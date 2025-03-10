@@ -29,4 +29,3 @@ def get_strava_activities():
             "status": response.status_code,
             "details": response.json()
         }
-}
