@@ -24,15 +24,16 @@ else:
     db = None
 
 # Cargar credenciales de Strava desde las variables de entorno
-CLIENT_ID = os.getenv("CLIENT_ID", "151673")  # ⚠️ Cambia si es otro ID
+CLIENT_ID = os.getenv("CLIENT_ID", "151673")  # ⚠️ Asegúrate de que es correcto
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "4f3e5a80e4810ad27b161b63730590c9a0d30051")
+
 
 def get_saved_tokens():
     """Obtiene los tokens de Strava guardados en Firestore."""
     if db is None:
         print("⚠️ Firestore no está disponible.")
         return None
-
+    
     try:
         doc = db.collection("config").document("strava").get()
         if doc.exists:
@@ -41,6 +42,7 @@ def get_saved_tokens():
     except Exception as e:
         print(f"❌ Error obteniendo los tokens: {e}")
         return None
+
 
 def refresh_access_token():
     """Refresca el Access Token y lo guarda en Firestore."""
@@ -76,6 +78,7 @@ def refresh_access_token():
     else:
         print(f"❌ Error refrescando token: {response.json()}")
         return None
+
 
 def get_strava_activities():
     """Obtiene actividades recientes de Strava."""
@@ -120,9 +123,11 @@ def get_strava_activities():
     ]
     return {"activities": filtered_activities}
 
+
 @app.get("/strava/activities")
 def fetch_activities():
     return get_strava_activities()
+
 
 @app.get("/")
 def strava_callback(code: str = Query(None)):
@@ -154,6 +159,7 @@ def strava_callback(code: str = Query(None)):
             return {"error": "Respuesta de Strava incompleta", "details": tokens}
     else:
         return {"error": "No se pudo autenticar con Strava", "details": response.json()}
+
 
 # Iniciar el servidor correctamente
 if __name__ == "__main__":
