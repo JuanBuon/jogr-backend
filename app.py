@@ -62,13 +62,17 @@ def refresh_access_token():
 
     if response.status_code == 200:
         new_tokens = response.json()
-        if db:
-            db.collection("config").document("strava").set({
-                "access_token": new_tokens["access_token"],
-                "refresh_token": new_tokens["refresh_token"]
-            }, merge=True)
-            print("🔄 Access Token refrescado y guardado en Firestore.")
-        return new_tokens["access_token"]
+        if "access_token" in new_tokens and "refresh_token" in new_tokens:
+            if db:
+                db.collection("config").document("strava").set({
+                    "access_token": new_tokens["access_token"],
+                    "refresh_token": new_tokens["refresh_token"]
+                }, merge=True)
+                print("🔄 Access Token refrescado y guardado en Firestore.")
+            return new_tokens["access_token"]
+        else:
+            print("❌ Error: Strava no devolvió tokens válidos.")
+            return None
     else:
         print(f"❌ Error refrescando token: {response.json()}")
         return None
@@ -89,6 +93,15 @@ def get_strava_activities():
 
     headers = {"Authorization": f"Bearer {access_token}"}
     response = requests.get("https://www.strava.com/api/v3/athlete/activities", headers=headers)
+
+    if response.status_code == 401:
+        print("⚠️ Access Token inválido. Intentando refrescar...")
+        access_token = refresh_access_token()
+        if not access_token:
+            return {"error": "No se pudo refrescar el token de acceso"}
+        
+        headers = {"Authorization": f"Bearer {access_token}"}
+        response = requests.get("https://www.strava.com/api/v3/athlete/activities", headers=headers)
 
     if response.status_code != 200:
         return {"error": "No se pudieron obtener actividades", "status": response.status_code, "details": response.json()}
