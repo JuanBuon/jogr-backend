@@ -1,10 +1,22 @@
 import os
 import requests
+import json
 from google.cloud import firestore
+from google.oauth2 import service_account
 from fastapi import FastAPI, Query
 
 app = FastAPI()
-db = firestore.Client()
+
+# Cargar credenciales de Firebase desde la variable de entorno
+credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+
+if credentials_json:
+    credentials_dict = json.loads(credentials_json)
+    credentials = service_account.Credentials.from_service_account_info(credentials_dict)
+    db = firestore.Client(credentials=credentials)
+else:
+    print("❌ No se encontraron credenciales de Google Cloud en las variables de entorno.")
+    db = None
 
 # Cargar credenciales de Strava desde las variables de entorno
 CLIENT_ID = os.getenv("CLIENT_ID", "151673")  # ⚠️ Cambia si es otro ID
@@ -12,6 +24,10 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET", "4f3e5a80e4810ad27b161b63730590c9a0d3
 
 def get_saved_tokens():
     """Obtiene los tokens de Strava guardados en Firestore"""
+    if db is None:
+        print("❌ No se puede acceder a Firestore.")
+        return None
+
     doc = db.collection("config").document("strava").get()
     if doc.exists:
         return doc.to_dict()
@@ -37,11 +53,12 @@ def refresh_access_token():
 
     if response.status_code == 200:
         new_tokens = response.json()
-        db.collection("config").document("strava").set({
-            "access_token": new_tokens["access_token"],
-            "refresh_token": new_tokens["refresh_token"]
-        }, merge=True)
-        print("🔄 Access Token refrescado y guardado en Firestore.")
+        if db:
+            db.collection("config").document("strava").set({
+                "access_token": new_tokens["access_token"],
+                "refresh_token": new_tokens["refresh_token"]
+            }, merge=True)
+            print("🔄 Access Token refrescado y guardado en Firestore.")
         return new_tokens["access_token"]
     else:
         print(f"❌ Error refrescando token: {response.json()}")
@@ -49,6 +66,9 @@ def refresh_access_token():
 
 def get_strava_activities():
     """Obtiene actividades recientes de Strava"""
+    if db is None:
+        return {"error": "Firestore no está disponible"}
+
     saved_tokens = get_saved_tokens()
     if not saved_tokens or "access_token" not in saved_tokens:
         print("⚠️ No hay access_token guardado. Intentando refrescar...")
@@ -85,6 +105,9 @@ def fetch_activities():
 @app.get("/callback")
 def strava_callback(code: str = Query(...)):
     """Recibe el código de autorización de Strava y obtiene los tokens."""
+    if db is None:
+        return {"error": "Firestore no está disponible"}
+
     response = requests.post(
         "https://www.strava.com/oauth/token",
         data={
