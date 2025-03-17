@@ -124,11 +124,11 @@ def get_strava_activities():
 def fetch_activities():
     return get_strava_activities()
 
-@app.get("/callback")
-def strava_callback(code: str = Query(...)):
+@app.get("/")
+def strava_callback(code: str = Query(None)):
     """Recibe el código de autorización de Strava y obtiene los tokens."""
-    if db is None:
-        return {"error": "Firestore no está disponible"}
+    if code is None:
+        return {"error": "Código de autorización no proporcionado"}
 
     response = requests.post(
         "https://www.strava.com/oauth/token",
