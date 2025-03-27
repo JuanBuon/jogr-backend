@@ -24,8 +24,8 @@ else:
     db = None
 
 # Cargar credenciales de Strava desde las variables de entorno
-CLIENT_ID = os.getenv("CLIENT_ID", "151673")  # ⚠️ Asegúrate de que es correcto
-CLIENT_SECRET = os.getenv("CLIENT_SECRET", "4f3e5a80e4810ad27b161b63730590c9a0d30051")
+CLIENT_ID = os.getenv("CLIENT_ID", "")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
 
 
 def get_saved_tokens():
@@ -135,6 +135,8 @@ def strava_callback(code: str = Query(None)):
     if code is None:
         return {"error": "Código de autorización no proporcionado"}
 
+    print("🔁 Código recibido:", code)
+
     response = requests.post(
         "https://www.strava.com/oauth/token",
         data={
@@ -149,15 +151,17 @@ def strava_callback(code: str = Query(None)):
         tokens = response.json()
         
         if "access_token" in tokens and "refresh_token" in tokens:
-            db.collection("config").document("strava").set({
-                "access_token": tokens["access_token"],
-                "refresh_token": tokens["refresh_token"]
-            }, merge=True)
-            print("✅ Tokens de Strava guardados en Firestore.")
+            if db:
+                db.collection("config").document("strava").set({
+                    "access_token": tokens["access_token"],
+                    "refresh_token": tokens["refresh_token"]
+                }, merge=True)
+                print("✅ Tokens de Strava guardados en Firestore.")
             return {"message": "Autenticación con Strava exitosa"}
         else:
             return {"error": "Respuesta de Strava incompleta", "details": tokens}
     else:
+        print(f"❌ Error autenticando con Strava: {response.json()}")
         return {"error": "No se pudo autenticar con Strava", "details": response.json()}
 
 
