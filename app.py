@@ -154,7 +154,8 @@ def strava_callback(code: str = Query(None)):
                     "refresh_token": tokens["refresh_token"]
                 }, merge=True)
                 print("✅ Tokens de Strava guardados en Firestore.")
-            return RedirectResponse(url="jogr://auth")
+            # 🔁 Redirigimos a la app con el código incluido
+            return RedirectResponse(url=f"jogr://auth?code={code}")
         else:
             return {"error": "Respuesta de Strava incompleta", "details": tokens}
     else:
