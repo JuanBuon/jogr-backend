@@ -10,6 +10,7 @@ app = FastAPI()
 
 # Cargar credenciales de Firebase desde la variable de entorno
 credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+print("📄 Credenciales recibidas (truncadas):", credentials_json[:50] if credentials_json else "Nada")
 
 if credentials_json:
     try:
