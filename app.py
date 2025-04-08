@@ -4,6 +4,7 @@ import json
 from google.cloud import firestore
 from google.oauth2 import service_account
 from fastapi import FastAPI, Query
+from fastapi.responses import RedirectResponse
 
 app = FastAPI()
 
@@ -29,7 +30,6 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
 
 
 def get_saved_tokens():
-    """Obtiene los tokens de Strava guardados en Firestore."""
     if db is None:
         print("⚠️ Firestore no está disponible.")
         return None
@@ -45,7 +45,6 @@ def get_saved_tokens():
 
 
 def refresh_access_token():
-    """Refresca el Access Token y lo guarda en Firestore."""
     saved_tokens = get_saved_tokens()
     if not saved_tokens or "refresh_token" not in saved_tokens:
         print("⚠️ No hay refresh_token guardado en Firestore.")
@@ -81,7 +80,6 @@ def refresh_access_token():
 
 
 def get_strava_activities():
-    """Obtiene actividades recientes de Strava."""
     if db is None:
         return {"error": "Firestore no está disponible"}
 
@@ -114,8 +112,8 @@ def get_strava_activities():
         {
             "id": activity["id"],
             "type": activity["type"],
-            "distance": round(activity["distance"] / 1000, 2),  # Metros a km
-            "duration": round(activity["moving_time"] / 60, 2),  # Segundos a minutos
+            "distance": round(activity["distance"] / 1000, 2),
+            "duration": round(activity["moving_time"] / 60, 2),
             "elevation": round(activity["total_elevation_gain"], 2),
             "date": activity["start_date"]
         }
@@ -131,7 +129,6 @@ def fetch_activities():
 
 @app.get("/")
 def strava_callback(code: str = Query(None)):
-    """Recibe el código de autorización de Strava y obtiene los tokens."""
     if code is None:
         return {"error": "Código de autorización no proporcionado"}
 
@@ -149,7 +146,7 @@ def strava_callback(code: str = Query(None)):
 
     if response.status_code == 200:
         tokens = response.json()
-        
+
         if "access_token" in tokens and "refresh_token" in tokens:
             if db:
                 db.collection("config").document("strava").set({
@@ -157,7 +154,7 @@ def strava_callback(code: str = Query(None)):
                     "refresh_token": tokens["refresh_token"]
                 }, merge=True)
                 print("✅ Tokens de Strava guardados en Firestore.")
-            return {"message": "Autenticación con Strava exitosa"}
+            return RedirectResponse(url="jogr://auth")
         else:
             return {"error": "Respuesta de Strava incompleta", "details": tokens}
     else:
@@ -165,7 +162,6 @@ def strava_callback(code: str = Query(None)):
         return {"error": "No se pudo autenticar con Strava", "details": response.json()}
 
 
-# Iniciar el servidor correctamente
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
