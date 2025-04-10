@@ -152,16 +152,37 @@ def strava_callback(code: str = Query(None)):
             if db:
                 db.collection("config").document("strava").set({
                     "access_token": tokens["access_token"],
-                    "refresh_token": tokens["refresh_token"]
+                    "refresh_token": tokens["refresh_token"],
+                    "athlete": tokens["athlete"]
                 }, merge=True)
-                print("✅ Tokens de Strava guardados en Firestore.")
-            # 🔁 Redirigimos a la app con el código incluido
+                print("✅ Tokens y atleta guardados en Firestore.")
             return RedirectResponse(url=f"jogr://auth?code={code}")
         else:
             return {"error": "Respuesta de Strava incompleta", "details": tokens}
     else:
         print(f"❌ Error autenticando con Strava: {response.json()}")
         return {"error": "No se pudo autenticar con Strava", "details": response.json()}
+
+
+@app.get("/user")
+def get_user_id():
+    """Devuelve el ID del usuario autenticado desde Firestore."""
+    if db is None:
+        return {"error": "Firestore no está disponible"}
+
+    try:
+        doc = db.collection("config").document("strava").get()
+        if doc.exists:
+            data = doc.to_dict()
+            if "athlete" in data and "id" in data["athlete"]:
+                return {"userID": str(data["athlete"]["id"])}
+            else:
+                return {"error": "No se encontró el ID del atleta en los datos"}
+        else:
+            return {"error": "Documento 'strava' no encontrado"}
+    except Exception as e:
+        print(f"❌ Error leyendo el documento de Strava: {e}")
+        return {"error": "Error accediendo a Firestore"}
 
 
 if __name__ == "__main__":
