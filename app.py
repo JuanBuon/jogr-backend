@@ -65,6 +65,11 @@ def strava_callback(code: str = Query(None)):
                 "userID": userID,
                 "stravaID": strava_id,
                 "nickname": nickname,
+                "email": "",
+                "birthdate": "",
+                "gender": "",
+                "country": "",
+                "description": "",
                 "platforms": {
                     "strava": strava_id
                 }
