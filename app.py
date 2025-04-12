@@ -11,7 +11,7 @@ app = FastAPI()
 
 # Cargar credenciales de Firebase desde la variable de entorno
 credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-print("📄 Credenciales recibidas (truncadas):", credentials_json[:50] if credentials_json else "Nada")
+print("\U0001F4C4 Credenciales recibidas (truncadas):", credentials_json[:50] if credentials_json else "Nada")
 
 if credentials_json:
     try:
@@ -55,15 +55,13 @@ def strava_callback(code: str = Query(None)):
         return {"error": "Respuesta de Strava incompleta", "details": tokens}
 
     strava_id = str(tokens["athlete"]["id"])
-    nickname = tokens["athlete"].get("username", "strava_user")
+    nickname = tokens["athlete"].get("username") or tokens["athlete"].get("firstname") or "strava_user"
 
     if db:
-        user_ref = db.collection("users").document(strava_id)
-        user_doc = user_ref.get()
-
-        if not user_doc.exists:
-            userID = str(uuid.uuid4())  # ID único interno de JogR
-            user_ref.set({
+        user_query = db.collection("users").where("stravaID", "==", strava_id).get()
+        if not user_query:
+            userID = str(uuid.uuid4())
+            db.collection("users").document(userID).set({
                 "userID": userID,
                 "stravaID": strava_id,
                 "nickname": nickname,
@@ -75,7 +73,6 @@ def strava_callback(code: str = Query(None)):
         else:
             print(f"👤 Usuario ya registrado con Strava ID: {strava_id}")
 
-        # Guardar tokens en config/strava
         db.collection("config").document("strava").set({
             "access_token": tokens["access_token"],
             "refresh_token": tokens["refresh_token"],
