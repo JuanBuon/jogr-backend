@@ -207,6 +207,7 @@ def save_activity(payload: dict = Body(...)):
         activity_id = str(payload["id"])
         document_id = f"{payload['userID']}_{activity_id}"
 
+        # Guardar en colección principal
         db.collection("activities").document(document_id).set({
             "userID": payload["userID"],
             "activityID": activity_id,
@@ -218,12 +219,51 @@ def save_activity(payload: dict = Body(...)):
             "includedInLeagues": payload["includedInLeagues"]
         })
 
+        # Guardar en subcolección por cada liga
+        for league_id in payload["includedInLeagues"]:
+            db.collection("leagues").document(league_id).collection("activities").document(document_id).set({
+                "userID": payload["userID"],
+                "activityID": activity_id,
+                "type": payload["type"],
+                "distance": payload["distance"],
+                "duration": payload["duration"],
+                "elevation": payload["elevation"],
+                "date": payload["date"]
+            })
+
         print(f"✅ Actividad guardada: {document_id}")
         return {"success": True, "message": "Actividad guardada correctamente"}
 
     except Exception as e:
         print(f"❌ Error guardando actividad: {e}")
         return {"error": "Error al guardar la actividad", "details": str(e)}
+
+@app.get("/league/{league_id}/activities")
+def get_league_activities(league_id: str):
+    if db is None:
+        return {"error": "Firestore no está disponible"}
+
+    try:
+        docs = db.collection("leagues").document(league_id).collection("activities").stream()
+        activities = []
+        for doc in docs:
+            data = doc.to_dict()
+            activities.append({
+                "userID": data.get("userID"),
+                "id": data.get("activityID"),
+                "type": data.get("type"),
+                "distance": data.get("distance"),
+                "duration": data.get("duration"),
+                "elevation": data.get("elevation"),
+                "date": data.get("date")
+            })
+
+        print(f"📥 Actividades devueltas para liga {league_id}: {len(activities)}")
+        return {"activities": activities}
+
+    except Exception as e:
+        print(f"❌ Error al leer actividades de liga: {e}")
+        return {"error": "Error accediendo a Firestore", "details": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
