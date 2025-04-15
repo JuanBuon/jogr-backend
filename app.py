@@ -146,52 +146,51 @@ def fetch_activities():
     ]
     return {"activities": filtered}
 
-@app.get("/ranking")
-def compute_ranking():
+@app.get("/league/{league_id}/ranking")
+def compute_league_ranking(league_id: str):
     if db is None:
         return {"error": "Firestore no está disponible"}
 
-    config_doc = db.collection("config").document("strava").get()
-    if not config_doc.exists:
-        return {"error": "No hay token de acceso guardado"}
+    try:
+        docs = db.collection("leagues").document(league_id).collection("activities").stream()
+        league_activities = [doc.to_dict() for doc in docs]
 
-    saved = config_doc.to_dict()
-    strava_id = str(saved["athlete"]["id"])
+        from collections import defaultdict
+        user_data = defaultdict(list)
+        for a in league_activities:
+            user_data[a["userID"]].append(a)
 
-    activities = fetch_activities().get("activities", [])
+        def calculate_points(user_activities):
+            total_distance = sum(a["distance"] for a in user_activities)
+            total_duration = sum(a["duration"] for a in user_activities)
+            total_elevation = sum(a["elevation"] for a in user_activities)
+            num_runs = len(user_activities)
+            longest_run = max((a["distance"] for a in user_activities), default=0)
+            avg_speed_kph = (total_distance / (total_duration / 60)) if total_duration > 0 else 0
+            avg_speed_kmpm = (1 / avg_speed_kph) * 60 if avg_speed_kph > 0 else 0
 
-    from collections import defaultdict
-    user_data = defaultdict(list)
-    for a in activities:
-        user_data[a["userID"]].append(a)
+            score = 0
+            score += min(100, round(total_distance * 1))
+            score += min(50, round(max(0, (10 - avg_speed_kmpm) / 0.5) * 2))
+            score += min(50, num_runs * 5)
+            score += min(50, round(longest_run * 2))
+            score += min(50, round(total_elevation / 50))
+            score += min(50, round(total_duration / 10))
+            if num_runs >= 3:
+                score += 20
+            return score
 
-    def calculate_points(user_activities):
-        total_distance = sum(a["distance"] for a in user_activities)
-        total_duration = sum(a["duration"] for a in user_activities)
-        total_elevation = sum(a["elevation"] for a in user_activities)
-        num_runs = len(user_activities)
-        longest_run = max((a["distance"] for a in user_activities), default=0)
-        avg_speed_kph = (total_distance / (total_duration / 60)) if total_duration > 0 else 0
-        avg_speed_kmpm = (1 / avg_speed_kph) * 60 if avg_speed_kph > 0 else 0
+        ranking = []
+        for user_id, acts in user_data.items():
+            points = calculate_points(acts)
+            ranking.append({"userID": user_id, "points": points})
 
-        score = 0
-        score += min(100, round(total_distance * 1))
-        score += min(50, round(max(0, (10 - avg_speed_kmpm) / 0.5) * 2))
-        score += min(50, num_runs * 5)
-        score += min(50, round(longest_run * 2))
-        score += min(50, round(total_elevation / 50))
-        score += min(50, round(total_duration / 10))
-        if num_runs >= 3:
-            score += 20
-        return score
+        ranking.sort(key=lambda x: x["points"], reverse=True)
+        return {"ranking": ranking}
 
-    ranking = []
-    for user_id, acts in user_data.items():
-        points = calculate_points(acts)
-        ranking.append({"userID": user_id, "points": points})
-
-    ranking.sort(key=lambda x: x["points"], reverse=True)
-    return {"ranking": ranking}
+    except Exception as e:
+        print(f"❌ Error calculando ranking de liga: {e}")
+        return {"error": "Error accediendo a Firestore", "details": str(e)}
 
 @app.post("/activities/save")
 def save_activity(payload: dict = Body(...)):
@@ -207,7 +206,6 @@ def save_activity(payload: dict = Body(...)):
         activity_id = str(payload["id"])
         document_id = f"{payload['userID']}_{activity_id}"
 
-        # Guardar en colección principal
         db.collection("activities").document(document_id).set({
             "userID": payload["userID"],
             "activityID": activity_id,
@@ -219,7 +217,6 @@ def save_activity(payload: dict = Body(...)):
             "includedInLeagues": payload["includedInLeagues"]
         })
 
-        # Guardar en subcolección por cada liga
         for league_id in payload["includedInLeagues"]:
             db.collection("leagues").document(league_id).collection("activities").document(document_id).set({
                 "userID": payload["userID"],
