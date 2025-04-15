@@ -145,7 +145,6 @@ def fetch_activities():
         for a in activities if a["type"] in ["Run", "Walk"]
     ]
     return {"activities": filtered}
-
 @app.get("/league/{league_id}/ranking")
 def compute_league_ranking(league_id: str):
     if db is None:
@@ -166,8 +165,8 @@ def compute_league_ranking(league_id: str):
             total_elevation = sum(a["elevation"] for a in user_activities)
             num_runs = len(user_activities)
             longest_run = max((a["distance"] for a in user_activities), default=0)
-            avg_speed_kph = (total_distance / (total_duration / 60)) if total_duration > 0 else 0
-            avg_speed_kmpm = (1 / avg_speed_kph) * 60 if avg_speed_kph > 0 else 0
+            avg_speed_kph = (total_duration > 0) and (total_distance / (total_duration / 60)) or 0
+            avg_speed_kmpm = (avg_speed_kph > 0) and ((1 / avg_speed_kph) * 60) or 0
 
             score = 0
             score += min(100, round(total_distance * 1))
@@ -183,7 +182,18 @@ def compute_league_ranking(league_id: str):
         ranking = []
         for user_id, acts in user_data.items():
             points = calculate_points(acts)
-            ranking.append({"userID": user_id, "points": points})
+            # Buscar el nickname de este usuario
+            nickname = "Usuario"
+            user_doc = db.collection("users").document(user_id).get()
+            if user_doc.exists:
+                user_info = user_doc.to_dict()
+                nickname = user_info.get("nickname", "Usuario")
+
+            ranking.append({
+                "userID": user_id,
+                "points": points,
+                "nickname": nickname
+            })
 
         ranking.sort(key=lambda x: x["points"], reverse=True)
         return {"ranking": ranking}
