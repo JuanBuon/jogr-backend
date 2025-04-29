@@ -145,6 +145,34 @@ def fetch_activities():
         for a in activities if a["type"] in ["Run", "Walk"]
     ]
     return {"activities": filtered}
+
+@app.get("/activities/{user_id}")
+def get_activities_by_user(user_id: str):
+    if db is None:
+        return {"error": "Firestore no está disponible"}
+
+    try:
+        docs = db.collection("activities").where("userID", "==", user_id).stream()
+        activities = []
+        for doc in docs:
+            data = doc.to_dict()
+            activities.append({
+                "userID": data.get("userID"),
+                "id": data.get("activityID"),
+                "type": data.get("type"),
+                "distance": data.get("distance"),
+                "duration": data.get("duration"),
+                "elevation": data.get("elevation"),
+                "date": data.get("date")
+            })
+
+        print(f"📦 Actividades devueltas para el usuario {user_id}: {len(activities)}")
+        return {"activities": activities}
+
+    except Exception as e:
+        print(f"❌ Error al obtener actividades del usuario: {e}")
+        return {"error": "Error accediendo a Firestore", "details": str(e)}
+
 @app.get("/league/{league_id}/ranking")
 def compute_league_ranking(league_id: str):
     if db is None:
@@ -182,7 +210,6 @@ def compute_league_ranking(league_id: str):
         ranking = []
         for user_id, acts in user_data.items():
             points = calculate_points(acts)
-            # Buscar el nickname de este usuario
             nickname = "Usuario"
             user_doc = db.collection("users").document(user_id).get()
             if user_doc.exists:
