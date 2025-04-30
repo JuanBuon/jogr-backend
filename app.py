@@ -308,7 +308,7 @@ def save_achievements(payload: dict = Body(...)):
 
     try:
         user_id = payload.get("userID")
-        unlocked = payload.get("unlocked", [])
+        unlocked = payload.get("unlocked", {})  # dict con fechas
         locked = payload.get("locked", [])
 
         if not user_id:
@@ -316,7 +316,8 @@ def save_achievements(payload: dict = Body(...)):
 
         db.collection("userAchievements").document(user_id).set({
             "unlocked": unlocked,
-            "locked": locked
+            "locked": locked,
+            "updatedAt": datetime.utcnow().isoformat()
         })
 
         print(f"✅ Logros guardados para el usuario {user_id}")
