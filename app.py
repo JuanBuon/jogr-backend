@@ -110,197 +110,6 @@ def get_user_id():
         print(f"❌ Error leyendo el documento de usuario: {e}")
         return {"error": "Error accediendo a Firestore"}
 
-@app.get("/strava/activities")
-def fetch_activities():
-    if db is None:
-        return {"error": "Firestore no está disponible"}
-
-    config_doc = db.collection("config").document("strava").get()
-    if not config_doc.exists:
-        return {"error": "No hay token de acceso guardado"}
-
-    saved = config_doc.to_dict()
-    access_token = saved.get("access_token")
-
-    if not access_token:
-        return {"error": "Token de acceso no encontrado"}
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-    response = requests.get("https://www.strava.com/api/v3/athlete/activities", headers=headers)
-
-    if response.status_code != 200:
-        return {"error": "Error al obtener actividades", "status": response.status_code}
-
-    activities = response.json()
-    filtered = [
-        {
-            "userID": saved["athlete"]["id"],
-            "id": a["id"],
-            "type": a["type"],
-            "distance": round(a["distance"] / 1000, 2),
-            "duration": round(a["moving_time"] / 60, 2),
-            "elevation": round(a["total_elevation_gain"], 2),
-            "date": a["start_date"]
-        }
-        for a in activities if a["type"] in ["Run", "Walk"]
-    ]
-    return {"activities": filtered}
-
-@app.get("/activities/{user_id}")
-def get_activities_by_user(user_id: str):
-    if db is None:
-        return {"error": "Firestore no está disponible"}
-
-    try:
-        docs = db.collection("activities").where("userID", "==", user_id).stream()
-        activities = []
-        for doc in docs:
-            data = doc.to_dict()
-            activities.append({
-                "userID": data.get("userID"),
-                "id": data.get("activityID"),
-                "type": data.get("type"),
-                "distance": data.get("distance"),
-                "duration": data.get("duration"),
-                "elevation": data.get("elevation"),
-                "date": data.get("date")
-            })
-
-        print(f"📦 Actividades devueltas para el usuario {user_id}: {len(activities)}")
-        return {"activities": activities}
-
-    except Exception as e:
-        print(f"❌ Error al obtener actividades del usuario: {e}")
-        return {"error": "Error accediendo a Firestore", "details": str(e)}
-
-@app.get("/league/{league_id}/ranking")
-def compute_league_ranking(league_id: str):
-    if db is None:
-        return {"error": "Firestore no está disponible"}
-
-    try:
-        docs = db.collection("leagues").document(league_id).collection("activities").stream()
-        league_activities = [doc.to_dict() for doc in docs]
-
-        from collections import defaultdict
-        user_data = defaultdict(list)
-        for a in league_activities:
-            user_data[a["userID"]].append(a)
-
-        def calculate_points(user_activities):
-            total_distance = sum(a["distance"] for a in user_activities)
-            total_duration = sum(a["duration"] for a in user_activities)
-            total_elevation = sum(a["elevation"] for a in user_activities)
-            num_runs = len(user_activities)
-            longest_run = max((a["distance"] for a in user_activities), default=0)
-            avg_speed_kph = (total_duration > 0) and (total_distance / (total_duration / 60)) or 0
-            avg_speed_kmpm = (avg_speed_kph > 0) and ((1 / avg_speed_kph) * 60) or 0
-
-            score = 0
-            score += min(100, round(total_distance * 1))
-            score += min(50, round(max(0, (10 - avg_speed_kmpm) / 0.5) * 2))
-            score += min(50, num_runs * 5)
-            score += min(50, round(longest_run * 2))
-            score += min(50, round(total_elevation / 50))
-            score += min(50, round(total_duration / 10))
-            if num_runs >= 3:
-                score += 20
-            return score
-
-        ranking = []
-        for user_id, acts in user_data.items():
-            points = calculate_points(acts)
-            nickname = "Usuario"
-            user_doc = db.collection("users").document(user_id).get()
-            if user_doc.exists:
-                user_info = user_doc.to_dict()
-                nickname = user_info.get("nickname", "Usuario")
-
-            ranking.append({
-                "userID": user_id,
-                "points": points,
-                "nickname": nickname
-            })
-
-        ranking.sort(key=lambda x: x["points"], reverse=True)
-        return {"ranking": ranking}
-
-    except Exception as e:
-        print(f"❌ Error calculando ranking de liga: {e}")
-        return {"error": "Error accediendo a Firestore", "details": str(e)}
-
-@app.post("/activities/save")
-def save_activity(payload: dict = Body(...)):
-    if db is None:
-        return {"error": "Firestore no está disponible"}
-
-    try:
-        required_fields = ["userID", "id", "type", "distance", "duration", "elevation", "date", "includedInLeagues"]
-        for field in required_fields:
-            if field not in payload:
-                return {"error": f"Falta el campo obligatorio: {field}"}
-
-        activity_id = str(payload["id"])
-        document_id = f"{payload['userID']}_{activity_id}"
-
-        db.collection("activities").document(document_id).set({
-            "userID": payload["userID"],
-            "activityID": activity_id,
-            "type": payload["type"],
-            "distance": payload["distance"],
-            "duration": payload["duration"],
-            "elevation": payload["elevation"],
-            "date": payload["date"],
-            "includedInLeagues": payload["includedInLeagues"]
-        })
-
-        for league_id in payload["includedInLeagues"]:
-            db.collection("leagues").document(league_id).collection("activities").document(document_id).set({
-                "userID": payload["userID"],
-                "activityID": activity_id,
-                "type": payload["type"],
-                "distance": payload["distance"],
-                "duration": payload["duration"],
-                "elevation": payload["elevation"],
-                "date": payload["date"]
-            })
-
-        print(f"✅ Actividad guardada: {document_id}")
-        return {"success": True, "message": "Actividad guardada correctamente"}
-
-    except Exception as e:
-        print(f"❌ Error guardando actividad: {e}")
-        return {"error": "Error al guardar la actividad", "details": str(e)}
-
-@app.get("/league/{league_id}/activities")
-def get_league_activities(league_id: str):
-    if db is None:
-        return {"error": "Firestore no está disponible"}
-
-    try:
-        docs = db.collection("leagues").document(league_id).collection("activities").stream()
-        activities = []
-        for doc in docs:
-            data = doc.to_dict()
-            activities.append({
-                "userID": data.get("userID"),
-                "id": data.get("activityID"),
-                "type": data.get("type"),
-                "distance": data.get("distance"),
-                "duration": data.get("duration"),
-                "elevation": data.get("elevation"),
-                "date": data.get("date")
-            })
-
-        print(f"📥 Actividades devueltas para liga {league_id}: {len(activities)}")
-        return {"activities": activities}
-
-    except Exception as e:
-        print(f"❌ Error al leer actividades de liga: {e}")
-        return {"error": "Error accediendo a Firestore", "details": str(e)}
-
-from typing import List
-
 @app.post("/achievements/save")
 def save_achievements(payload: dict = Body(...)):
     if db is None:
@@ -308,15 +117,25 @@ def save_achievements(payload: dict = Body(...)):
 
     try:
         user_id = payload.get("userID")
-        unlocked = payload.get("unlocked", [])
+        unlocked = payload.get("unlocked", {})  # dict con fechas ISO
         locked = payload.get("locked", [])
 
         if not user_id:
             return {"error": "Falta el userID"}
 
+        # Obtener logros ya guardados para evitar duplicados
+        existing_doc = db.collection("userAchievements").document(user_id).get()
+        existing_unlocked = existing_doc.to_dict().get("unlocked", {}) if existing_doc.exists else {}
+
+        # Solo añadir los nuevos que no estén ya
+        for name, date in unlocked.items():
+            if name not in existing_unlocked:
+                existing_unlocked[name] = date
+
         db.collection("userAchievements").document(user_id).set({
-            "unlocked": unlocked,
-            "locked": locked
+            "unlocked": existing_unlocked,
+            "locked": locked,
+            "updatedAt": datetime.utcnow().isoformat()
         })
 
         print(f"✅ Logros guardados para el usuario {user_id}")
@@ -336,36 +155,10 @@ def get_user_achievements(user_id: str):
         if doc.exists:
             return {"exists": True, **doc.to_dict()}
         else:
-            return {"exists": False, "unlocked": [], "locked": []}
+            return {"exists": False, "unlocked": {}, "locked": []}
     except Exception as e:
         print(f"❌ Error al obtener logros: {e}")
         return {"error": "Error accediendo a Firestore", "details": str(e)}
-
-@app.post("/achievements/save")
-def save_achievements(payload: dict = Body(...)):
-    if db is None:
-        return {"error": "Firestore no está disponible"}
-
-    try:
-        user_id = payload.get("userID")
-        unlocked = payload.get("unlocked", {})  # ahora un dict con fechas
-        locked = payload.get("locked", [])
-
-        if not user_id:
-            return {"error": "Falta el userID"}
-
-        db.collection("userAchievements").document(user_id).set({
-            "unlocked": unlocked,
-            "locked": locked,
-            "updatedAt": datetime.utcnow().isoformat()
-        })
-
-        print(f"✅ Logros guardados para el usuario {user_id}")
-        return {"success": True, "message": "Logros guardados correctamente"}
-
-    except Exception as e:
-        print(f"❌ Error guardando logros: {e}")
-        return {"error": "Error al guardar los logros", "details": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
