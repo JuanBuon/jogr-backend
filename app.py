@@ -326,6 +326,47 @@ def save_achievements(payload: dict = Body(...)):
         print(f"❌ Error guardando logros: {e}")
         return {"error": "Error al guardar los logros", "details": str(e)}
 
+@app.get("/achievements/{user_id}")
+def get_user_achievements(user_id: str):
+    if db is None:
+        return {"error": "Firestore no está disponible"}
+
+    try:
+        doc = db.collection("userAchievements").document(user_id).get()
+        if doc.exists:
+            return {"exists": True, **doc.to_dict()}
+        else:
+            return {"exists": False, "unlocked": [], "locked": []}
+    except Exception as e:
+        print(f"❌ Error al obtener logros: {e}")
+        return {"error": "Error accediendo a Firestore", "details": str(e)}
+
+@app.post("/achievements/save")
+def save_achievements(payload: dict = Body(...)):
+    if db is None:
+        return {"error": "Firestore no está disponible"}
+
+    try:
+        user_id = payload.get("userID")
+        unlocked = payload.get("unlocked", {})  # ahora un dict con fechas
+        locked = payload.get("locked", [])
+
+        if not user_id:
+            return {"error": "Falta el userID"}
+
+        db.collection("userAchievements").document(user_id).set({
+            "unlocked": unlocked,
+            "locked": locked,
+            "updatedAt": datetime.utcnow().isoformat()
+        })
+
+        print(f"✅ Logros guardados para el usuario {user_id}")
+        return {"success": True, "message": "Logros guardados correctamente"}
+
+    except Exception as e:
+        print(f"❌ Error guardando logros: {e}")
+        return {"error": "Error al guardar los logros", "details": str(e)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
