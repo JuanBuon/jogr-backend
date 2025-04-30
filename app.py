@@ -299,6 +299,33 @@ def get_league_activities(league_id: str):
         print(f"❌ Error al leer actividades de liga: {e}")
         return {"error": "Error accediendo a Firestore", "details": str(e)}
 
+from typing import List
+
+@app.post("/achievements/save")
+def save_achievements(payload: dict = Body(...)):
+    if db is None:
+        return {"error": "Firestore no está disponible"}
+
+    try:
+        user_id = payload.get("userID")
+        unlocked = payload.get("unlocked", [])
+        locked = payload.get("locked", [])
+
+        if not user_id:
+            return {"error": "Falta el userID"}
+
+        db.collection("userAchievements").document(user_id).set({
+            "unlocked": unlocked,
+            "locked": locked
+        })
+
+        print(f"✅ Logros guardados para el usuario {user_id}")
+        return {"success": True, "message": "Logros guardados correctamente"}
+
+    except Exception as e:
+        print(f"❌ Error guardando logros: {e}")
+        return {"error": "Error al guardar los logros", "details": str(e)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
