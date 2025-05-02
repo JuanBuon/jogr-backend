@@ -30,7 +30,7 @@ def oauth_doc(uid: str):
 def ensure_access_token(uid: str) -> str:
     doc = oauth_doc(uid).get()
     if not doc.exists:
-        raise HTTPException(status_code=404, detail="Token de Strava no encontrado")
+        raise HTTPException(404, "Token de Strava no encontrado")
 
     data = doc.to_dict()
     if time.time() > data.get("expires_at", 0) - 300:
@@ -48,18 +48,17 @@ def ensure_access_token(uid: str) -> str:
     return data["access_token"]
 
 def _fmt_activity(d: dict) -> dict:
-    """Devuelve la actividad con un campo 'id' String homogéneo."""
     return {
-        "userID"  : d.get("userID"),
-        "id"      : str(d.get("activityID") or d.get("id")),
-        "type"    : d.get("type"),
+        "userID": d.get("userID"),
+        "id": str(d.get("activityID") or d.get("id")),
+        "type": d.get("type"),
         "distance": d.get("distance"),
         "duration": d.get("duration"),
         "elevation": d.get("elevation"),
-        "date"    : d.get("date")
+        "date": d.get("date")
     }
 
-# ───────────── Root: Strava callback ─────────────
+# ───────────── Strava callback ─────────────
 @app.head("/")
 def _head_ok():
     return PlainTextResponse("", status_code=200)
@@ -75,17 +74,21 @@ def strava_callback(code: str = Query(None)):
         "code": code,
         "grant_type": "authorization_code"
     })
-    resp.raise_for_status()
+
+    # ⬇️ DEBUG extra: imprime el error devuelto por Strava (400)
+    if resp.status_code != 200:
+        print("STRAVA ERROR:", resp.text)
+        resp.raise_for_status()
+
     tokens = resp.json()
 
     strava_id = str(tokens["athlete"]["id"])
     nickname  = tokens["athlete"].get("username") or tokens["athlete"].get("firstname") or "strava_user"
 
     q = db.collection("users").where("stravaID", "==", strava_id).get()
-    if q:
-        uid = q[0].id
-    else:
-        uid = str(uuid.uuid4())
+    uid = q[0].id if q else str(uuid.uuid4())
+
+    if not q:
         db.collection("users").document(uid).set({
             "userID": uid,
             "stravaID": strava_id,
@@ -106,7 +109,7 @@ def get_user_by_strava_id(strava_id: str):
     if not q:
         raise HTTPException(404, "Usuario no encontrado")
     return {"userID": q[0].id}
-# -----------------------------
+# -----------------------------------------------------------------
 
 # ───────────── Actividades ─────────────
 @app.get("/users/{uid}/strava/activities")
