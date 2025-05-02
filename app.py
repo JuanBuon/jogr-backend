@@ -7,11 +7,11 @@ from collections import defaultdict
 
 import requests
 from fastapi import FastAPI, Query, Body, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, PlainTextResponse
 from google.cloud import firestore
 from google.oauth2 import service_account
 
-# ──────────────────────────── Init ────────────────────────────
+# ───────────────────────── Init ──────────────────────────
 app = FastAPI()
 
 credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
@@ -28,7 +28,7 @@ CLIENT_SECRET   = os.getenv("CLIENT_SECRET", "")
 STRAVA_TOKEN_URL      = "https://www.strava.com/oauth/token"
 STRAVA_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 
-# ───────────────────────── Helpers ────────────────────────────
+# ───────────────────── Helpers ───────────────────────────
 def oauth_doc(user_id: str):
     return (
         db.collection("users")
@@ -44,18 +44,15 @@ def ensure_access_token(user_id: str) -> str:
         raise HTTPException(status_code=404, detail="Token de Strava no encontrado")
 
     data = doc.to_dict()
-    # Refrescar si expira en <5 min
     if time.time() > data.get("expires_at", 0) - 300:
         print(f"🔄 Refrescando token para {user_id}")
         resp = requests.post(STRAVA_TOKEN_URL, data={
-            "client_id"    : CLIENT_ID,
+            "client_id": CLIENT_ID,
             "client_secret": CLIENT_SECRET,
-            "grant_type"   : "refresh_token",
+            "grant_type": "refresh_token",
             "refresh_token": data["refresh_token"]
         })
-        if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail="Error refrescando token")
-
+        resp.raise_for_status()
         fresh = resp.json()
         fresh["expires_at"] = time.time() + fresh["expires_in"]
         oauth_doc(user_id).set(fresh)
@@ -63,88 +60,94 @@ def ensure_access_token(user_id: str) -> str:
 
     return data["access_token"]
 
-# ───────────────────────── Endpoints ──────────────────────────
+# ───────────────────── Root callback ─────────────────────
+@app.head("/")
+def strava_head():
+    """Safari/Chrome envían HEAD antes del GET: damos 200 para evitar 405."""
+    return PlainTextResponse("", status_code=200)
+
 @app.get("/")
 def strava_callback(code: str = Query(None)):
-    """Intercambia el código de Strava por tokens y crea/obtiene el usuario."""
     if code is None:
-        raise HTTPException(status_code=400, detail="Código de autorización no proporcionado")
+        return PlainTextResponse("Código de autorización no proporcionado", status_code=400)
 
+    # 1. Intercambiar código por tokens
     resp = requests.post(STRAVA_TOKEN_URL, data={
-        "client_id"    : CLIENT_ID,
+        "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
-        "code"         : code,
-        "grant_type"   : "authorization_code"
+        "code": code,
+        "grant_type": "authorization_code"
     })
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=resp.json())
 
-    tokens     = resp.json()
-    strava_id  = str(tokens["athlete"]["id"])
-    nickname   = tokens["athlete"].get("username") or tokens["athlete"].get("firstname") or "strava_user"
+    tokens = resp.json()
+    strava_id = str(tokens["athlete"]["id"])
+    nickname  = tokens["athlete"].get("username") or tokens["athlete"].get("firstname") or "strava_user"
 
-    # Buscar o crear usuario
+    # 2. Crear / obtener usuario interno
     q = db.collection("users").where("stravaID", "==", strava_id).get()
     if q:
         user_id = q[0].id
     else:
         user_id = str(uuid.uuid4())
         db.collection("users").document(user_id).set({
-            "userID"   : user_id,
-            "stravaID" : strava_id,
-            "nickname" : nickname,
-            "email"    : "",
+            "userID": user_id,
+            "stravaID": strava_id,
+            "nickname": nickname,
+            "email": "",
             "birthdate": "",
-            "gender"   : "",
-            "country"  : "",
+            "gender": "",
+            "country": "",
             "description": "",
-            "platforms": { "strava": strava_id }
+            "platforms": {"strava": strava_id}
         })
 
+    # 3. Guardar tokens por usuario
     tokens["expires_at"] = time.time() + tokens["expires_in"]
     oauth_doc(user_id).set(tokens)
 
-    # Redirige a la app nativa con userID interno
-    return RedirectResponse(url=f"jogr://auth?userID={user_id}")
+    # 4. Redirigir a JogR con **userID y code** (302)
+    return RedirectResponse(
+        url=f"jogr://auth?userID={user_id}&code={code}",
+        status_code=302
+    )
 
-# ---------- util legacy (opc.) ----------
+# ---------- util legacy -------------
 @app.get("/user/{strava_id}")
 def get_user_by_strava_id(strava_id: str):
     q = db.collection("users").where("stravaID", "==", str(strava_id)).get()
     if not q:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    return { "userID": q[0].id }
-# ----------------------------------------
+    return {"userID": q[0].id}
+# ------------------------------------
 
+# ─────────── Resto de endpoints (sin cambios funcionales) ──────────
 @app.get("/users/{user_id}/strava/activities")
 def fetch_strava_activities(user_id: str, per_page: int = Query(100, le=200)):
-    access_token = ensure_access_token(user_id)
-    headers = { "Authorization": f"Bearer {access_token}" }
-    resp = requests.get(STRAVA_ACTIVITIES_URL, headers=headers, params={ "per_page": per_page })
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail="Error en Strava")
-
+    access = ensure_access_token(user_id)
+    headers = {"Authorization": f"Bearer {access}"}
+    resp = requests.get(STRAVA_ACTIVITIES_URL, headers=headers, params={"per_page": per_page})
+    resp.raise_for_status()
     return {
         "activities": [
             {
-                "userID"  : user_id,
-                "id"      : a["id"],
-                "type"    : a["type"],
-                "distance": round(a["distance"] / 1000, 2),   # km
-                "duration": round(a["moving_time"] / 60, 2),  # min
+                "userID": user_id,
+                "id": a["id"],
+                "type": a["type"],
+                "distance": round(a["distance"] / 1000, 2),
+                "duration": round(a["moving_time"] / 60, 2),
                 "elevation": round(a["total_elevation_gain"], 2),
-                "date"    : a["start_date"]
+                "date": a["start_date"]
             }
-            for a in resp.json()
-            if a["type"] in ["Run", "Walk"]
+            for a in resp.json() if a["type"] in ["Run", "Walk"]
         ]
     }
 
 @app.get("/activities/{user_id}")
 def get_activities_by_user(user_id: str):
     docs = db.collection("activities").where("userID", "==", user_id).stream()
-    activities = [doc.to_dict() for doc in docs]
-    return { "activities": activities }
+    return {"activities": [doc.to_dict() for doc in docs]}
 
 @app.post("/activities/save")
 def save_activity(payload: dict = Body(...)):
@@ -155,107 +158,88 @@ def save_activity(payload: dict = Body(...)):
 
     doc_id = f"{payload['userID']}_{payload['id']}"
     db.collection("activities").document(doc_id).set({
-        "userID"  : payload["userID"],
+        "userID": payload["userID"],
         "activityID": str(payload["id"]),
-        "type"    : payload["type"],
+        "type": payload["type"],
         "distance": payload["distance"],
         "duration": payload["duration"],
         "elevation": payload["elevation"],
-        "date"    : payload["date"],
+        "date": payload["date"],
         "includedInLeagues": payload["includedInLeagues"]
     })
 
     for league_id in payload["includedInLeagues"]:
-        db.collection("leagues").document(league_id)             \
+        db.collection("leagues").document(league_id) \
           .collection("activities").document(doc_id).set({
-              "userID"  : payload["userID"],
+              "userID": payload["userID"],
               "activityID": str(payload["id"]),
-              "type"    : payload["type"],
+              "type": payload["type"],
               "distance": payload["distance"],
               "duration": payload["duration"],
               "elevation": payload["elevation"],
-              "date"    : payload["date"]
+              "date": payload["date"]
           })
-
-    return { "success": True }
+    return {"success": True}
 
 @app.get("/league/{league_id}/activities")
 def get_league_activities(league_id: str):
-    docs = (
-        db.collection("leagues")
-          .document(league_id)
-          .collection("activities")
-          .stream()
-    )
-    return { "activities": [doc.to_dict() for doc in docs] }
+    docs = db.collection("leagues").document(league_id).collection("activities").stream()
+    return {"activities": [doc.to_dict() for doc in docs]}
 
 @app.get("/league/{league_id}/ranking")
 def compute_league_ranking(league_id: str):
-    docs = (
-        db.collection("leagues")
-          .document(league_id)
-          .collection("activities")
-          .stream()
-    )
-    league_activities = [doc.to_dict() for doc in docs]
+    docs = db.collection("leagues").document(league_id).collection("activities").stream()
+    acts = [d.to_dict() for d in docs]
 
     user_data = defaultdict(list)
-    for a in league_activities:
+    for a in acts:
         user_data[a["userID"]].append(a)
 
-    def calc_points(acts):
-        total_dist  = sum(a["distance"]  for a in acts)
-        total_time  = sum(a["duration"]  for a in acts)
-        total_elev  = sum(a["elevation"] for a in acts)
-        longest_run = max((a["distance"] for a in acts), default=0)
-        num_runs    = len(acts)
-        avg_speed_kph  = (total_time > 0) and (total_dist / (total_time / 60)) or 0
-        avg_speed_kmpm = (avg_speed_kph > 0) and ((1/avg_speed_kph)*60) or 0
-
-        score = 0
-        score += min(100, round(total_dist * 1))
-        score += min(50, round(max(0, (10 - avg_speed_kmpm) / .5) * 2))
-        score += min(50, num_runs * 5)
-        score += min(50, round(longest_run * 2))
-        score += min(50, round(total_elev / 50))
-        score += min(50, round(total_time / 10))
-        if num_runs >= 3:
-            score += 20
-        return score
+    def score(acts):
+        d = sum(a["distance"] for a in acts)
+        t = sum(a["duration"] for a in acts)
+        e = sum(a["elevation"] for a in acts)
+        n = len(acts)
+        longest = max((a["distance"] for a in acts), default=0)
+        spkph = (t > 0) and (d / (t / 60)) or 0
+        spkmpm = (spkph > 0) and ((1/spkph)*60) or 0
+        s  = min(100, round(d))
+        s += min(50, round(max(0, (10 - spkmpm) / .5) * 2))
+        s += min(50, n * 5)
+        s += min(50, round(longest * 2))
+        s += min(50, round(e / 50))
+        s += min(50, round(t / 10))
+        if n >= 3: s += 20
+        return s
 
     ranking = []
     for uid, acts in user_data.items():
-        points = calc_points(acts)
         nickname = db.collection("users").document(uid).get().to_dict().get("nickname", "Usuario")
-        ranking.append({ "userID": uid, "nickname": nickname, "points": points })
+        ranking.append({"userID": uid, "nickname": nickname, "points": score(acts)})
 
     ranking.sort(key=lambda x: x["points"], reverse=True)
-    return { "ranking": ranking }
+    return {"ranking": ranking}
 
 @app.post("/achievements/save")
 def save_achievements(payload: dict = Body(...)):
-    user_id  = payload.get("userID")
-    unlocked = payload.get("unlocked", {})
-    locked   = payload.get("locked", [])
-
-    if not user_id:
+    uid = payload.get("userID")
+    if not uid:
         raise HTTPException(status_code=400, detail="Falta userID")
-
-    db.collection("userAchievements").document(user_id).set({
-        "unlocked" : unlocked,
-        "locked"   : locked,
+    db.collection("userAchievements").document(uid).set({
+        "unlocked": payload.get("unlocked", {}),
+        "locked": payload.get("locked", []),
         "updatedAt": datetime.utcnow().isoformat()
     })
-    return { "success": True }
+    return {"success": True}
 
 @app.get("/achievements/{user_id}")
 def get_user_achievements(user_id: str):
     doc = db.collection("userAchievements").document(user_id).get()
     if doc.exists:
-        return { "exists": True, **doc.to_dict() }
-    return { "exists": False, "unlocked": {}, "locked": [] }
+        return {"exists": True, **doc.to_dict()}
+    return {"exists": False, "unlocked": {}, "locked": []}
 
-# ──────────────────────────── Run ─────────────────────────────
+# ──────────────────────── Run ────────────────────────────
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
