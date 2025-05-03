@@ -222,6 +222,65 @@ def get_user_achievements(uid: str):
         return {"exists": True, **doc.to_dict()}
     return {"exists": False, "unlocked": {}, "locked": []}
 
+# ────────────── imports & init (igual) ──────────────
+import os, json, time, uuid, requests
+from datetime import datetime
+from collections import defaultdict
+from fastapi import FastAPI, Query, Body, HTTPException
+from fastapi.responses import RedirectResponse, PlainTextResponse
+from google.cloud import firestore
+from google.oauth2 import service_account
+
+app = FastAPI()
+# … credenciales Firestore, STRAVA_*  (sin cambios)
+
+# --------------------- secciones existentes ---------------------
+#  • strava_callback
+#  • fetch_strava_activities
+#  • actividades por liga
+#  • ranking
+#  • achievements
+# ---------------------------------------------------------------
+
+# ────────────── NUEVO · Likes ──────────────
+@app.post("/activities/{act_id}/likes/{user_id}")
+def toggle_like(act_id: str, user_id: str):
+    doc = db.collection("activities").document(act_id).collection("social").document("likes")
+    like_doc = doc.get()
+    likes = like_doc.to_dict().get("users", []) if like_doc.exists else []
+
+    if user_id in likes:
+        likes.remove(user_id)      # quitar like
+        did_like = False
+    else:
+        likes.append(user_id)      # dar like
+        did_like = True
+
+    doc.set({"users": likes})
+    return {"success": True, "didLike": did_like, "likeCount": len(likes)}
+
+# ────────────── NUEVO · Comentarios ──────────────
+@app.get("/activities/{act_id}/comments")
+def list_comments(act_id: str):
+    docs = db.collection("activities").document(act_id).collection("comments").order_by("date").stream()
+    comments = [d.to_dict() | {"id": d.id} for d in docs]
+    return {"comments": comments}
+
+@app.post("/activities/{act_id}/comments")
+def add_comment(act_id: str, payload: dict = Body(...)):
+    required = {"userID","nickname","text"}
+    if not required.issubset(payload):
+        raise HTTPException(400, "Faltan campos")
+
+    comment_id = str(uuid.uuid4())
+    db.collection("activities").document(act_id)\
+      .collection("comments").document(comment_id).set({
+          "userID"   : payload["userID"],
+          "nickname" : payload["nickname"],
+          "text"     : payload["text"],
+          "date"     : datetime.utcnow().isoformat()
+      })
+    return {"success": True, "commentID": comment_id}
 # ───────────── Run ─────────────
 if __name__ == "__main__":
     import uvicorn
