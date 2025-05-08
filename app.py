@@ -46,15 +46,20 @@ def ensure_access_token(uid: str) -> str:
     return data["access_token"]
 
 def _fmt_act(d: dict) -> dict:
-    return {
+    """Homogeneiza doc Firestore → JSON para la app."""
+    out = {
         "userID"  : d["userID"],
         "id"      : str(d.get("activityID") or d.get("id")),
         "type"    : d["type"],
         "distance": d["distance"],
         "duration": d["duration"],
         "elevation": d["elevation"],
-        "date"    : d["date"]
+        "date"    : d["date"],
     }
+    # Campos opcionales
+    if "avg_speed" in d:        out["avg_speed"] = d["avg_speed"]
+    if "summary_polyline" in d: out["summary_polyline"] = d["summary_polyline"]
+    return out
 
 # ───────────────────── Strava OAuth callback ─────────────
 @app.head("/")     # health-check
@@ -91,18 +96,24 @@ def strava_callback(code: str = Query(None)):
 @app.get("/users/{uid}/strava/activities")
 def strava_activities(uid: str, per_page: int = Query(100, le=200)):
     token = ensure_access_token(uid)
-    r = requests.get(STRAVA_ACTIVITIES_URL,
-                     headers={"Authorization": f"Bearer {token}"},
-                     params={"per_page": per_page})
+    r = requests.get(
+        STRAVA_ACTIVITIES_URL,
+        headers={"Authorization": f"Bearer {token}"},
+        params={"per_page": per_page}
+    )
     r.raise_for_status()
     return {"activities": [
-        {"userID": uid,
-         "id": str(a["id"]),
-         "type": a["type"],
-         "distance": round(a["distance"]/1000, 2),
-         "duration": round(a["moving_time"]/60, 2),
-         "elevation": round(a["total_elevation_gain"], 2),
-         "date": a["start_date"]}
+        {
+            "userID"          : uid,
+            "id"              : str(a["id"]),
+            "type"            : a["type"],
+            "distance"        : round(a["distance"]/1000, 2),      # km
+            "duration"        : round(a["moving_time"]/60, 2),     # min
+            "elevation"       : round(a["total_elevation_gain"], 2),
+            "avg_speed"       : a.get("average_speed"),            # m/s  ⬅️ nuevo
+            "summary_polyline": a["map"]["summary_polyline"],      # ⬅️ nuevo
+            "date"            : a["start_date"]
+        }
         for a in r.json() if a["type"] in ("Run", "Walk")
     ]}
 
@@ -120,6 +131,10 @@ def save_activity(p: dict = Body(...)):
     doc_id = f"{p['userID']}_{p['id']}"
     base = {k: p[k] for k in ("userID","type","distance","duration","elevation","date")}
     base["activityID"] = str(p["id"])
+    # opcionales
+    if "avg_speed" in p:        base["avg_speed"] = p["avg_speed"]
+    if "summary_polyline" in p: base["summary_polyline"] = p["summary_polyline"]
+
     db.collection("activities").document(doc_id).set({**base,
         "includedInLeagues": p["includedInLeagues"]})
 
@@ -188,7 +203,7 @@ def add_comment(act: str, p: dict = Body(...)):
 # ───────────────────── Achievements (igual) ───────────────
 @app.post("/achievements/save")
 def save_achievements(p: dict = Body(...)):
-    uid=p.get("userID");         unlocked=p.get("unlocked",{}); locked=p.get("locked",[])
+    uid=p.get("userID"); unlocked=p.get("unlocked",{}); locked=p.get("locked",[])
     if not uid: raise HTTPException(400,"Falta userID")
     db.collection("userAchievements").document(uid).set({
         "unlocked":unlocked,"locked":locked,"updatedAt":datetime.utcnow().isoformat()
