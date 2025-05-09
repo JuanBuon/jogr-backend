@@ -1,3 +1,5 @@
+# app.py
+
 import os
 import json
 import time
@@ -34,15 +36,15 @@ db = firestore.Client(
 log.info("✅ Firestore conectado")
 
 # ——— Strava constants ————————————————————————————————————
-CLIENT_ID            = os.getenv("CLIENT_ID", "")
-CLIENT_SECRET        = os.getenv("CLIENT_SECRET", "")
-STRAVA_TOKEN_URL     = "https://www.strava.com/oauth/token"
-STRAVA_ACTIVITIES_URL= "https://www.strava.com/api/v3/athlete/activities"
+CLIENT_ID             = os.getenv("CLIENT_ID", "")
+CLIENT_SECRET         = os.getenv("CLIENT_SECRET", "")
+STRAVA_TOKEN_URL      = "https://www.strava.com/oauth/token"
+STRAVA_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 
 # Callback endpoint
-CALLBACK_PATH    = "/auth/strava/callback"
-BACKEND_ORIGIN   = os.getenv("BACKEND_ORIGIN", "https://jogr-backend.onrender.com")
-REDIRECT_URI     = f"{BACKEND_ORIGIN}{CALLBACK_PATH}"
+CALLBACK_PATH  = "/auth/strava/callback"
+BACKEND_ORIGIN = os.getenv("BACKEND_ORIGIN", "https://jogr-backend.onrender.com")
+REDIRECT_URI   = f"{BACKEND_ORIGIN}{CALLBACK_PATH}"
 
 # ——— Helpers Firestore ———————————————————————————————————
 def oauth_doc(uid: str):
@@ -71,16 +73,16 @@ def ensure_access_token(uid: str) -> str:
 
 def _fmt_act(d: dict) -> dict:
     out = {
-        "userID":   d["userID"],
-        "id":       str(d.get("activityID") or d.get("id")),
-        "type":     d["type"],
-        "distance": d["distance"],
-        "duration": d["duration"],
-        "elevation":d["elevation"],
-        "date":     d["date"]
+        "userID":    d["userID"],
+        "id":        str(d.get("activityID") or d.get("id")),
+        "type":      d["type"],
+        "distance":  d["distance"],
+        "duration":  d["duration"],
+        "elevation": d["elevation"],
+        "date":      d["date"]
     }
-    if "avg_speed"       in d: out["avg_speed"]        = d["avg_speed"]
-    if "summary_polyline"in d: out["summary_polyline"] = d["summary_polyline"]
+    if "avg_speed"        in d: out["avg_speed"]        = d["avg_speed"]
+    if "summary_polyline" in d: out["summary_polyline"] = d["summary_polyline"]
     return out
 
 # ——— Health-check —————————————————————————————————————————
@@ -98,11 +100,11 @@ def strava_callback(
 
     # 1) Intercambia code por token
     r = requests.post(STRAVA_TOKEN_URL, data={
-        "client_id":     CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "code":          code,
-        "grant_type":    "authorization_code",
-        "redirect_uri":  REDIRECT_URI
+        "client_id":    CLIENT_ID,
+        "client_secret":CLIENT_SECRET,
+        "code":         code,
+        "grant_type":   "authorization_code",
+        "redirect_uri": REDIRECT_URI
     })
     r.raise_for_status()
     tok = r.json()
@@ -177,8 +179,8 @@ def save_activity(p: dict = Body(...)):
     doc_id = f"{p['userID']}_{p['id']}"
     base   = {k:p[k] for k in ("userID","type","distance","duration","elevation","date")}
     base["activityID"] = str(p["id"])
-    if "avg_speed"       in p: base["avg_speed"]        = p["avg_speed"]
-    if "summary_polyline"in p: base["summary_polyline"] = p["summary_polyline"]
+    if "avg_speed"        in p: base["avg_speed"]        = p["avg_speed"]
+    if "summary_polyline" in p: base["summary_polyline"] = p["summary_polyline"]
 
     db.collection("activities").document(doc_id).set({**base,"includedInLeagues":p["includedInLeagues"]})
     for lg in p["includedInLeagues"]:
@@ -197,40 +199,47 @@ def league_ranking(lid: str):
     docs = db.collection("leagues").document(lid).collection("activities").stream()
     acts = [d.to_dict() for d in docs]
     buckets = defaultdict(list)
-    for a in acts: buckets[a["userID"]].append(a)
+    for a in acts:
+        buckets[a["userID"]].append(a)
 
     def score(arr):
-        dist = sum(a["distance"] for a in arr)
-        time_m = sum(a["duration"] for a in arr)
-        elev = sum(a["elevation"] for a in arr)
-        runs = len(arr)
-        longest = max((a["distance"] for a in arr), default=0)
-        spkph   = (time_m>0) and dist/(time_m/60) or 0
-        spkmpm  = (spkph>0) and (1/spkph)*60 or 0
-        s = min(100,round(dist)) + min(50,round(max(0,(10-spkmpm)/.5)*2))
-        s+=min(50,runs*5)+min(50,round(longest*2))+min(50,round(elev/50))
-        s+=min(50,round(time_m/10)); s+=20 if runs>=3 else 0
-        return s
+        dist      = sum(a["distance"]  for a in arr)
+        time_m    = sum(a["duration"]  for a in arr)
+        runs      = len(arr)
+        longest   = max((a["distance"] for a in arr), default=0)
 
-    rank=[]
+        # 1) Distancia total → máx. 60 pts
+        pts_dist   = min(60, round(dist))
+        # 2) Ritmo promedio → máx. 60 pts
+        avg_pace   = time_m / dist if dist > 0 else float('inf')
+        pts_pace   = min(60, round(max(0, (10 - avg_pace) / 0.5 * 6)))
+        # 3) Tiempo total → máx. 40 pts (3 min = 1 pt)
+        pts_time   = min(40, round(time_m / 3))
+        # 4) Número de carreras → máx. 30 pts
+        pts_runs   = min(30, runs)
+        # 5) Carrera más larga → máx. 30 pts
+        pts_longest= min(30, round(longest * 2))
+        # 6) Bonus constancia (>=3) → +20 pts
+        pts_bonus  = 20 if runs >= 3 else 0
+
+        return pts_dist + pts_pace + pts_time + pts_runs + pts_longest + pts_bonus
+
+    rank = []
     for uid, arr in buckets.items():
         nick = db.collection("users").document(uid).get().to_dict().get("nickname","Usuario")
-        rank.append({"userID":uid,"nickname":nick,"points":score(arr)})
+        rank.append({"userID":uid, "nickname":nick, "points":score(arr)})
     rank.sort(key=lambda x: x["points"], reverse=True)
-    return {"ranking":rank}
+    return {"ranking": rank}
 
 # ——— Likes & Comments ——————————————————————————————————
 @app.post("/activities/{act}/likes/{uid}")
 def toggle_like(act: str, uid: str):
-    ref = db.collection("activities").document(act).collection("social").document("likes")
-    doc = ref.get()
-    likes = doc.to_dict().get("users",[]) if doc.exists else []
-    did = False
-    if uid in likes:
-        likes.remove(uid)
-    else:
-        likes.append(uid)
-        did = True
+    ref  = db.collection("activities").document(act).collection("social").document("likes")
+    doc  = ref.get()
+    likes= doc.to_dict().get("users",[]) if doc.exists else []
+    did  = uid not in likes
+    if did: likes.append(uid)
+    else:   likes.remove(uid)
     ref.set({"users":likes})
     return {"success":True,"didLike":did,"likeCount":len(likes)}
 
@@ -272,8 +281,8 @@ def save_achievements(p: dict = Body(...)):
 
 @app.get("/achievements/{uid}")
 def get_achievements(uid: str):
-    d = db.collection("userAchievements").document(uid).get()
-    base = {"exists":d.exists}
+    d    = db.collection("userAchievements").document(uid).get()
+    base = {"exists": d.exists}
     return {**base, **(d.to_dict() if d.exists else {"unlocked":{}, "locked":[]})}
 
 # ——— Run server ———————————————————————————————————————
