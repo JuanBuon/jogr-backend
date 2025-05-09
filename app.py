@@ -11,7 +11,7 @@ from google.oauth2 import service_account
 # ───────────────────────── Init ─────────────────────────
 app = FastAPI()
 
-# Credenciales de Firestore
+# Firestore
 cred_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
 if not cred_json:
     raise RuntimeError("Falta GOOGLE_CREDENTIALS_JSON")
@@ -23,13 +23,11 @@ db = firestore.Client(
 )
 print("✅ Firestore conectado")
 
-# Cliente OAuth Strava
+# Strava OAuth
 CLIENT_ID     = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
-REDIRECT_URI  = os.getenv("REDIRECT_URI", "")
-
-if REDIRECT_URI == "":
-    raise RuntimeError("Falta REDIRECT_URI (ej: https://jogr-backend.onrender.com/)")
+if CLIENT_ID == "" or CLIENT_SECRET == "":
+    raise RuntimeError("Faltan CLIENT_ID o CLIENT_SECRET en variables de entorno")
 
 STRAVA_TOKEN_URL      = "https://www.strava.com/oauth/token"
 STRAVA_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
@@ -44,6 +42,7 @@ def ensure_access_token(uid: str) -> str:
         raise HTTPException(404, "Token Strava no encontrado")
 
     data = doc.to_dict()
+    # refresca si expirará en 5 minutos
     if time.time() > data.get("expires_at", 0) - 300:
         r = requests.post(
             STRAVA_TOKEN_URL,
@@ -52,7 +51,6 @@ def ensure_access_token(uid: str) -> str:
                 "client_secret": CLIENT_SECRET,
                 "grant_type":    "refresh_token",
                 "refresh_token": data["refresh_token"],
-                "redirect_uri":  REDIRECT_URI
             },
         )
         r.raise_for_status()
@@ -89,6 +87,7 @@ def strava_callback(code: str = Query(None)):
     if not code:
         return PlainTextResponse("Código no proporcionado", 400)
 
+    # intercambio de código → token (NO redirect_uri aquí)
     r = requests.post(
         STRAVA_TOKEN_URL,
         data={
@@ -96,7 +95,6 @@ def strava_callback(code: str = Query(None)):
             "client_secret": CLIENT_SECRET,
             "code":          code,
             "grant_type":    "authorization_code",
-            "redirect_uri":  REDIRECT_URI
         },
     )
     r.raise_for_status()
@@ -105,26 +103,25 @@ def strava_callback(code: str = Query(None)):
     sid  = str(tok["athlete"]["id"])
     nick = tok["athlete"].get("username") or tok["athlete"].get("firstname") or "strava_user"
 
+    # crea o busca usuario
     q = db.collection("users").where("stravaID", "==", sid).get()
     if q:
         uid = q[0].id
     else:
         uid = str(uuid.uuid4())
         db.collection("users").document(uid).set({
-            "userID":      uid,
-            "stravaID":    sid,
-            "nickname":    nick,
-            "email":       "",
-            "birthdate":   "",
-            "gender":      "",
-            "country":     "",
-            "description": "",
-            "platforms":   {"strava": sid}
+            "userID":    uid,
+            "stravaID":  sid,
+            "nickname":  nick,
+            "email":     "", "birthdate": "", "gender": "",
+            "country":   "", "description": "",
+            "platforms": {"strava": sid}
         })
 
     tok["expires_at"] = time.time() + tok["expires_in"]
     oauth_doc(uid).set(tok)
 
+    # redirige de vuelta a la app móvil
     return RedirectResponse(f"jogr://auth?userID={uid}&code={code}", status_code=302)
 
 # ───────────────────── Strava activities raw ─────────────
@@ -248,10 +245,10 @@ def add_comment(act: str, p: dict = Body(...)):
         raise HTTPException(400,"Faltan campos")
     cid = str(uuid.uuid4())
     db.collection("activities").document(act).collection("comments").document(cid).set({
-        "userID": p["userID"],
-        "nickname": p["nickname"],
-        "text": p["text"],
-        "date": datetime.utcnow().isoformat()
+        "userID":    p["userID"],
+        "nickname":  p["nickname"],
+        "text":      p["text"],
+        "date":      datetime.utcnow().isoformat()
     })
     return {"success": True, "commentID": cid}
 
@@ -265,7 +262,7 @@ def save_achievements(p: dict = Body(...)):
         raise HTTPException(400,"Falta userID")
     db.collection("userAchievements").document(uid).set({
         "unlocked": unlocked,
-        "locked": locked,
+        "locked":   locked,
         "updatedAt": datetime.utcnow().isoformat()
     })
     return {"success": True}
