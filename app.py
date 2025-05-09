@@ -26,11 +26,9 @@ print("✅ Firestore conectado")
 # Cliente OAuth Strava
 CLIENT_ID     = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
-# Debes definir esta variable a tu dominio de callback completo:
-# Ejemplo: "https://jogr-backend.onrender.com/"
 REDIRECT_URI  = os.getenv("REDIRECT_URI", "")
 
-if REDIRECT_URI.isEmpty := (REDIRECT_URI == ""):
+if REDIRECT_URI == "":
     raise RuntimeError("Falta REDIRECT_URI (ej: https://jogr-backend.onrender.com/)")
 
 STRAVA_TOKEN_URL      = "https://www.strava.com/oauth/token"
@@ -38,7 +36,6 @@ STRAVA_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 
 # ───────────────────────── Helpers ──────────────────────
 def oauth_doc(uid: str):
-    # document /users/{uid}/oauth/strava
     return db.collection("users").document(uid).collection("oauth").document("strava")
 
 def ensure_access_token(uid: str) -> str:
@@ -47,16 +44,15 @@ def ensure_access_token(uid: str) -> str:
         raise HTTPException(404, "Token Strava no encontrado")
 
     data = doc.to_dict()
-    # refrescar si expira en menos de 5 minutos
     if time.time() > data.get("expires_at", 0) - 300:
         r = requests.post(
             STRAVA_TOKEN_URL,
             data={
-                "client_id": CLIENT_ID,
+                "client_id":     CLIENT_ID,
                 "client_secret": CLIENT_SECRET,
-                "grant_type": "refresh_token",
+                "grant_type":    "refresh_token",
                 "refresh_token": data["refresh_token"],
-                "redirect_uri": REDIRECT_URI
+                "redirect_uri":  REDIRECT_URI
             },
         )
         r.raise_for_status()
@@ -68,7 +64,6 @@ def ensure_access_token(uid: str) -> str:
     return data["access_token"]
 
 def _fmt_act(d: dict) -> dict:
-    """Homogeneiza doc Firestore → JSON para la app."""
     out = {
         "userID":    d["userID"],
         "id":        str(d.get("activityID") or d.get("id")),
@@ -78,7 +73,6 @@ def _fmt_act(d: dict) -> dict:
         "elevation": d["elevation"],
         "date":      d["date"],
     }
-    # Campos opcionales (ritmo y polyline)
     if "avg_speed" in d:
         out["avg_speed"] = d["avg_speed"]
     if "summary_polyline" in d:
@@ -95,7 +89,6 @@ def strava_callback(code: str = Query(None)):
     if not code:
         return PlainTextResponse("Código no proporcionado", 400)
 
-    # Intercambio de código por token
     r = requests.post(
         STRAVA_TOKEN_URL,
         data={
@@ -109,7 +102,6 @@ def strava_callback(code: str = Query(None)):
     r.raise_for_status()
     tok  = r.json()
 
-    # Creamos / buscamos usuario interno
     sid  = str(tok["athlete"]["id"])
     nick = tok["athlete"].get("username") or tok["athlete"].get("firstname") or "strava_user"
 
@@ -119,19 +111,20 @@ def strava_callback(code: str = Query(None)):
     else:
         uid = str(uuid.uuid4())
         db.collection("users").document(uid).set({
-            "userID": uid,
-            "stravaID": sid,
-            "nickname": nick,
-            "email": "", "birthdate": "", "gender": "", "country": "",
+            "userID":      uid,
+            "stravaID":    sid,
+            "nickname":    nick,
+            "email":       "",
+            "birthdate":   "",
+            "gender":      "",
+            "country":     "",
             "description": "",
-            "platforms": {"strava": sid}
+            "platforms":   {"strava": sid}
         })
 
-    # Guardamos tokens con expiración absoluta
     tok["expires_at"] = time.time() + tok["expires_in"]
     oauth_doc(uid).set(tok)
 
-    # Redirigimos de vuelta a la app móvil
     return RedirectResponse(f"jogr://auth?userID={uid}&code={code}", status_code=302)
 
 # ───────────────────── Strava activities raw ─────────────
@@ -147,18 +140,17 @@ def strava_activities(uid: str, per_page: int = Query(100, le=200)):
     return {
         "activities": [
             {
-                "userID":             uid,
-                "id":                 str(a["id"]),
-                "type":               a["type"],
-                "distance":           round(a["distance"] / 1000, 2),
-                "duration":           round(a["moving_time"] / 60, 2),
-                "elevation":          round(a["total_elevation_gain"], 2),
-                "avg_speed":          a.get("average_speed"),              # m/s
-                "summary_polyline":   a["map"]["summary_polyline"],        # ruta
-                "date":               a["start_date"],
+                "userID":           uid,
+                "id":               str(a["id"]),
+                "type":             a["type"],
+                "distance":         round(a["distance"] / 1000, 2),
+                "duration":         round(a["moving_time"] / 60, 2),
+                "elevation":        round(a["total_elevation_gain"], 2),
+                "avg_speed":        a.get("average_speed"),
+                "summary_polyline": a["map"]["summary_polyline"],
+                "date":             a["start_date"],
             }
-            for a in r.json()
-            if a["type"] in ("Run", "Walk")
+            for a in r.json() if a["type"] in ("Run", "Walk")
         ]
     }
 
@@ -175,9 +167,8 @@ def save_activity(p: dict = Body(...)):
         raise HTTPException(400, "Faltan campos requeridos")
 
     doc_id = f"{p['userID']}_{p['id']}"
-    base = {k: p[k] for k in ("userID","type","distance","duration","elevation","date")}
+    base   = {k: p[k] for k in ("userID","type","distance","duration","elevation","date")}
     base["activityID"] = str(p["id"])
-    # opcionales
     if "avg_speed" in p:
         base["avg_speed"] = p["avg_speed"]
     if "summary_polyline" in p:
@@ -189,11 +180,8 @@ def save_activity(p: dict = Body(...)):
     })
 
     for lg in p["includedInLeagues"]:
-        db.collection("leagues")\
-          .document(lg)\
-          .collection("activities")\
-          .document(doc_id)\
-          .set(base)
+        db.collection("leagues").document(lg)\
+          .collection("activities").document(doc_id).set(base)
 
     return {"success": True}
 
@@ -212,45 +200,42 @@ def league_ranking(lid: str):
         buckets[a["userID"]].append(a)
 
     def score(arr):
-        dist = sum(a["distance"] for a in arr)
-        time_m = sum(a["duration"] for a in arr)
-        elev = sum(a["elevation"] for a in arr)
+        dist = sum(x["distance"] for x in arr)
+        time_m = sum(x["duration"] for x in arr)
+        elev = sum(x["elevation"] for x in arr)
         runs = len(arr)
-        longest = max((a["distance"] for a in arr), default=0)
-        spkph = dist / (time_m / 60) if time_m > 0 else 0
-        spkmpm = (1/spkph)*60 if spkph > 0 else 0
+        longest = max((x["distance"] for x in arr), default=0)
+        spkph = dist / (time_m/60) if time_m>0 else 0
+        spkmpm = (1/spkph)*60 if spkph>0 else 0
         s  = min(100, round(dist))
-        s += min(50, round(max(0, (10-spkmpm)/0.5)*2))
-        s += min(50, runs * 5)
-        s += min(50, round(longest * 2))
-        s += min(50, round(elev / 50))
-        s += min(50, round(time_m / 10))
-        if runs >= 3: s += 20
+        s += min(50, round(max(0,(10-spkmpm)/0.5)*2))
+        s += min(50, runs*5)
+        s += min(50, round(longest*2))
+        s += min(50, round(elev/50))
+        s += min(50, round(time_m/10))
+        if runs>=3: s += 20
         return s
 
     ranking = []
     for uid, arr in buckets.items():
         nick = db.collection("users").document(uid).get().to_dict().get("nickname","Usuario")
-        ranking.append({"userID": uid, "nickname": nick, "points": score(arr)})
+        ranking.append({"userID":uid,"nickname":nick,"points":score(arr)})
     ranking.sort(key=lambda x: x["points"], reverse=True)
     return {"ranking": ranking}
 
-# ───────────────────── Likes ──────────────────────────────
+# ───────────────────── Likes & Comments ──────────────────
 @app.post("/activities/{act}/likes/{uid}")
 def toggle_like(act: str, uid: str):
     ref = db.collection("activities").document(act).collection("social").document("likes")
     doc = ref.get()
     likes = doc.to_dict().get("users", []) if doc.exists else []
     if uid in likes:
-        likes.remove(uid)
-        did = False
+        likes.remove(uid); did = False
     else:
-        likes.append(uid)
-        did = True
+        likes.append(uid); did = True
     ref.set({"users": likes})
     return {"success": True, "didLike": did, "likeCount": len(likes)}
 
-# ───────────────────── Comentarios ────────────────────────
 @app.get("/activities/{act}/comments")
 def get_comments(act: str):
     docs = db.collection("activities").document(act).collection("comments").order_by("date").stream()
@@ -270,14 +255,14 @@ def add_comment(act: str, p: dict = Body(...)):
     })
     return {"success": True, "commentID": cid}
 
-# ───────────────────── Achievements (igual) ───────────────
+# ───────────────────── Achievements ──────────────────────
 @app.post("/achievements/save")
 def save_achievements(p: dict = Body(...)):
     uid      = p.get("userID")
     unlocked = p.get("unlocked", {})
     locked   = p.get("locked", [])
     if not uid:
-        raise HTTPException(400, "Falta userID")
+        raise HTTPException(400,"Falta userID")
     db.collection("userAchievements").document(uid).set({
         "unlocked": unlocked,
         "locked": locked,
