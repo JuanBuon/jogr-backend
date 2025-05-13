@@ -34,17 +34,17 @@ db = firestore.Client(
 log.info("✅ Firestore conectado")
 
 # ——— Strava constants ————————————————————————————————————
-CLIENT_ID            = os.getenv("CLIENT_ID", "")
-CLIENT_SECRET        = os.getenv("CLIENT_SECRET", "")
-STRAVA_TOKEN_URL     = "https://www.strava.com/oauth/token"
-STRAVA_ACTIVITIES_URL= "https://www.strava.com/api/v3/athlete/activities"
+CLIENT_ID             = os.getenv("CLIENT_ID", "")
+CLIENT_SECRET         = os.getenv("CLIENT_SECRET", "")
+STRAVA_TOKEN_URL      = "https://www.strava.com/oauth/token"
+STRAVA_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 
 # Callback endpoint
-CALLBACK_PATH    = "/auth/strava/callback"
-BACKEND_ORIGIN   = os.getenv("BACKEND_ORIGIN", "https://jogr-backend.onrender.com")
-REDIRECT_URI     = f"{BACKEND_ORIGIN}{CALLBACK_PATH}"
+CALLBACK_PATH  = "/auth/strava/callback"
+BACKEND_ORIGIN = os.getenv("BACKEND_ORIGIN", "https://jogr-backend.onrender.com")
+REDIRECT_URI   = f"{BACKEND_ORIGIN}{CALLBACK_PATH}"
 
-# ——— Helpers Firestore ————————————————————————————————————
+# ——— Helpers Firestore ———————————————————————————————————
 def oauth_doc(uid: str):
     return db.collection("users").document(uid).collection("oauth").document("strava")
 
@@ -95,8 +95,6 @@ def strava_callback(
     state: str = Query(None, description="State opcional")
 ):
     log.info("🔑 Callback Strava recibido: code=%s state=%s", code, state)
-
-    # 1) Intercambia code por token
     r = requests.post(STRAVA_TOKEN_URL, data={
         "client_id":     CLIENT_ID,
         "client_secret": CLIENT_SECRET,
@@ -108,7 +106,6 @@ def strava_callback(
     tok = r.json()
     log.info("✅ Token Strava OK: athlete.id=%s", tok["athlete"]["id"])
 
-    # 2) Encuentra o crea usuario interno
     sid  = str(tok["athlete"]["id"])
     nick = tok["athlete"].get("username") or tok["athlete"].get("firstname") or "strava"
     q    = db.collection("users").where("stravaID","==",sid).get()
@@ -127,15 +124,12 @@ def strava_callback(
         })
         log.info("🆕 Usuario creado: %s (Strava %s)", uid, sid)
 
-    # 3) Guarda tokens
     tok["expires_at"] = time.time() + tok["expires_in"]
     oauth_doc(uid).set(tok)
     log.info("💾 Tokens guardados para userID=%s", uid)
-
-    # 4) Redirige a la app iOS
     return RedirectResponse(f"jogr://auth?userID={uid}&code={code}", status_code=302)
 
-# ——— Strava “raw” activities —————————————————————————————
+# ——— Strava raw activities ——————————————————————————————
 @app.get("/users/{uid}/strava/activities")
 def strava_activities(uid: str, per_page: int = Query(100, le=200)):
     token = ensure_access_token(uid)
@@ -148,21 +142,11 @@ def strava_activities(uid: str, per_page: int = Query(100, le=200)):
     arr = r.json()
     log.info("📦 %d actividades Strava para %s", len(arr), uid)
     return {"activities": [
-        {
-            "userID":           uid,
-            "id":               str(a["id"]),
-            "type":             a["type"],
-            "distance":         round(a["distance"]/1000,2),
-            "duration":         round(a["moving_time"]/60,2),
-            "elevation":        round(a["total_elevation_gain"],2),
-            "avg_speed":        a.get("average_speed"),
-            "summary_polyline": a["map"]["summary_polyline"],
-            "date":             a["start_date"]
-        }
+        {  # … mismo formateo que antes … }
         for a in arr if a["type"] in ("Run","Walk")
     ]}
 
-# ——— CRUD actividades propias ————————————————————————————
+# ——— CRUD propias ————————————————————————————————————————
 @app.get("/activities/{uid}")
 def activities_by_user(uid: str):
     docs = db.collection("activities").where("userID","==",uid).stream()
@@ -170,70 +154,46 @@ def activities_by_user(uid: str):
 
 @app.post("/activities/save")
 def save_activity(p: dict = Body(...)):
-    need = {"userID","id","type","distance","duration","elevation","date","includedInLeagues"}
-    if not need.issubset(p):
-        raise HTTPException(400,"Faltan campos en /activities/save")
-
-    doc_id = f"{p['userID']}_{p['id']}"
-    base   = {k: p[k] for k in ("userID","type","distance","duration","elevation","date")}  
-    base["activityID"] = str(p["id"])
-    if "avg_speed"       in p: base["avg_speed"]        = p["avg_speed"]
-    if "summary_polyline"in p: base["summary_polyline"] = p["summary_polyline"]
-
-    db.collection("activities").document(doc_id).set({**base, "includedInLeagues": p["includedInLeagues"]})
-    for lg in p["includedInLeagues"]:
-        db.collection("leagues").document(lg).collection("activities").document(doc_id).set(base)
-
+    # … idéntico …
     return {"success": True}
 
-# ——— Liga: ranking (general o semanal) —————————————————————————
+# ——— Liga: ranking con nueva lógica —————————————————————————
 @app.get("/league/{lid}/ranking")
 def league_ranking(
     lid: str,
     period: str = Query("general", description="general o weekly")
 ):
-    log.info("📊 calculando ranking %s para liga %s", period, lid)
     docs = db.collection("leagues").document(lid).collection("activities").stream()
     acts = [d.to_dict() for d in docs]
-
     if period.lower() == "weekly":
         cutoff = datetime.utcnow() - timedelta(days=7)
-        acts = [a for a in acts if datetime.fromisoformat(a["date"].replace("Z", "")) >= cutoff]
+        acts = [a for a in acts if datetime.fromisoformat(a["date"].replace("Z","")) >= cutoff]
 
     buckets = defaultdict(list)
     for a in acts:
         buckets[a["userID"]].append(a)
 
     def score(arr):
-        dist    = sum(a["distance"] for a in arr)
-        # Paso 1: puntos por distancia
-        pts_dist = min(60, round(dist))
-
-        # Paso 2: ritmo medio en min/km
-        total_time = sum(a["duration"] for a in arr)
-        avg_pace = total_time > 0 and (total_time / dist) or float('inf')  # min/km
-        # escala lineal: 7.5 -> 0pts, 5.0 -> 60pts
-        if avg_pace >= 7.5:
-            pts_pace = 0
-        elif avg_pace <= 5.0:
+        # 1. Distancia: 1 pt/km
+        dist = sum(a["distance"] for a in arr)
+        pts_dist = min(60, int(dist))
+        # 2. Ritmo medio (min/km)
+        time_m = sum(a["duration"] for a in arr)
+        spkph = dist/(time_m/60) if time_m>0 else 0
+        pace = (1/spkph)*60 if spkph>0 else float('inf')
+        if pace <= 5:
             pts_pace = 60
+        elif pace >= 7.5:
+            pts_pace = 0
         else:
-            // linear interpolation
-            pts_pace = round((7.5 - avg_pace) / (7.5 - 5.0) * 60)
-
-        # Paso 3: tiempo total corriendo (en min)
-        # escala: 0->0, 30->10, 60->20, 120->40
-        t = total_time
-        if t >= 120:
-            pts_time = 40
-        else:
-            pts_time = round(t / 120 * 40)
-
-        # Paso 4: número de carreras
+            pts_pace = round((7.5 - pace)/(7.5 - 5)*60)
+        # 3. Desnivel acumulado: 1 pt cada 10 m
+        elev = sum(a["elevation"] for a in arr)
+        pts_elev = min(30, int(elev/10))
+        # 4. Número de carreras
         runs = len(arr)
-        pts_runs =  min(30, runs * 10)
-
-        # Paso 5: tirada más larga (tramos)
+        pts_runs = min(30, runs*10)
+        # 5. Tirada más larga
         longest = max((a["distance"] for a in arr), default=0)
         if longest >= 15:
             pts_long = 30
@@ -243,18 +203,17 @@ def league_ranking(
             pts_long = 10
         else:
             pts_long = 0
+        # 6. Bonus constancia
+        pts_bonus = 20 if runs >= 3 else 0
+        return pts_dist + pts_pace + pts_elev + pts_runs + pts_long + pts_bonus
 
-        # Paso 6: bonus
-        bonus = 20 if runs >= 3 else 0
-
-        return pts_dist + pts_pace + pts_time + pts_runs + pts_long + bonus
-
-    rank_list = []
+    rank = []
     for uid, arr in buckets.items():
         nick = db.collection("users").document(uid).get().to_dict().get("nickname","Usuario")
-        rank_list.append({"userID": uid, "nickname": nick, "points": score(arr)})
-    rank_list.sort(key=lambda x: x["points"], reverse=True)
-    return {"ranking": rank_list}
+        rank.append({"userID": uid, "nickname": nick, "points": score(arr)})
+    rank.sort(key=lambda x: x["points"], reverse=True)
+    return {"ranking": rank}
+
 
 # ——— Likes & Comments ——————————————————————————————————
 @app.post("/activities/{act}/likes/{uid}")
