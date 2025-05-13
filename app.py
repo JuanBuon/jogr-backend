@@ -34,17 +34,17 @@ db = firestore.Client(
 log.info("✅ Firestore conectado")
 
 # ——— Strava constants ————————————————————————————————————
-CLIENT_ID             = os.getenv("CLIENT_ID", "")
-CLIENT_SECRET         = os.getenv("CLIENT_SECRET", "")
-STRAVA_TOKEN_URL      = "https://www.strava.com/oauth/token"
-STRAVA_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
+CLIENT_ID            = os.getenv("CLIENT_ID", "")
+CLIENT_SECRET        = os.getenv("CLIENT_SECRET", "")
+STRAVA_TOKEN_URL     = "https://www.strava.com/oauth/token"
+STRAVA_ACTIVITIES_URL= "https://www.strava.com/api/v3/athlete/activities"
 
 # Callback endpoint
-CALLBACK_PATH  = "/auth/strava/callback"
-BACKEND_ORIGIN = os.getenv("BACKEND_ORIGIN", "https://jogr-backend.onrender.com")
-REDIRECT_URI   = f"{BACKEND_ORIGIN}{CALLBACK_PATH}"
+CALLBACK_PATH    = "/auth/strava/callback"
+BACKEND_ORIGIN   = os.getenv("BACKEND_ORIGIN", "https://jogr-backend.onrender.com")
+REDIRECT_URI     = f"{BACKEND_ORIGIN}{CALLBACK_PATH}"
 
-# ——— Helpers Firestore ———————————————————————————————————
+# ——— Helpers Firestore ————————————————————————————————————
 def oauth_doc(uid: str):
     return db.collection("users").document(uid).collection("oauth").document("strava")
 
@@ -175,7 +175,7 @@ def save_activity(p: dict = Body(...)):
         raise HTTPException(400,"Faltan campos en /activities/save")
 
     doc_id = f"{p['userID']}_{p['id']}"
-    base   = {k: p[k] for k in ("userID","type","distance","duration","elevation","date")}
+    base   = {k: p[k] for k in ("userID","type","distance","duration","elevation","date")}  
     base["activityID"] = str(p["id"])
     if "avg_speed"       in p: base["avg_speed"]        = p["avg_speed"]
     if "summary_polyline"in p: base["summary_polyline"] = p["summary_polyline"]
@@ -185,14 +185,6 @@ def save_activity(p: dict = Body(...)):
         db.collection("leagues").document(lg).collection("activities").document(doc_id).set(base)
 
     return {"success": True}
-
-# ——— Liga: actividades ——————————————————————————————————
-@app.get("/league/{lid}/activities")
-def league_activities(lid: str):
-    log.info("📥 solicitadas actividades de liga %s", lid)
-    docs = db.collection("leagues").document(lid).collection("activities").stream()
-    acts = [_fmt_act(d.to_dict()) for d in docs]
-    return {"activities": acts}
 
 # ——— Liga: ranking (general o semanal) —————————————————————————
 @app.get("/league/{lid}/ranking")
@@ -206,7 +198,7 @@ def league_ranking(
 
     if period.lower() == "weekly":
         cutoff = datetime.utcnow() - timedelta(days=7)
-        acts = [a for a in acts if datetime.fromisoformat(a["date"].replace("Z","")) >= cutoff]
+        acts = [a for a in acts if datetime.fromisoformat(a["date"].replace("Z", "")) >= cutoff]
 
     buckets = defaultdict(list)
     for a in acts:
@@ -214,26 +206,55 @@ def league_ranking(
 
     def score(arr):
         dist    = sum(a["distance"] for a in arr)
-        time_m  = sum(a["duration"] for a in arr)
-        elev    = sum(a["elevation"] for a in arr)
-        runs    = len(arr)
-        longest = max((a["distance"] for a in arr), default=0)
-        spkph   = (time_m>0) and dist/(time_m/60) or 0
-        spkmpm  = (spkph>0) and (1/spkph)*60 or 0
-        s = min(60, round(dist))                    # hasta 60 pts
-        s+= min(60, round(max(0, (1/spkmpm)*60)))   # hasta 60 pts por ritmo
-        s+= min(40, round(time_m/1))                # hasta 40 pts por tiempo total
-        s+= min(30, runs * 10)                      # hasta 30 pts por número de salidas
-        s+= min(30, round(longest*2))               # hasta 30 pts por tirada larga
-        s+= 20 if runs >= 3 else 0                  # bonus 20
-        return s
+        # Paso 1: puntos por distancia
+        pts_dist = min(60, round(dist))
 
-    rank = []
+        # Paso 2: ritmo medio en min/km
+        total_time = sum(a["duration"] for a in arr)
+        avg_pace = total_time > 0 and (total_time / dist) or float('inf')  # min/km
+        # escala lineal: 7.5 -> 0pts, 5.0 -> 60pts
+        if avg_pace >= 7.5:
+            pts_pace = 0
+        elif avg_pace <= 5.0:
+            pts_pace = 60
+        else:
+            // linear interpolation
+            pts_pace = round((7.5 - avg_pace) / (7.5 - 5.0) * 60)
+
+        # Paso 3: tiempo total corriendo (en min)
+        # escala: 0->0, 30->10, 60->20, 120->40
+        t = total_time
+        if t >= 120:
+            pts_time = 40
+        else:
+            pts_time = round(t / 120 * 40)
+
+        # Paso 4: número de carreras
+        runs = len(arr)
+        pts_runs =  min(30, runs * 10)
+
+        # Paso 5: tirada más larga (tramos)
+        longest = max((a["distance"] for a in arr), default=0)
+        if longest >= 15:
+            pts_long = 30
+        elif longest >= 10:
+            pts_long = 20
+        elif longest >= 5:
+            pts_long = 10
+        else:
+            pts_long = 0
+
+        # Paso 6: bonus
+        bonus = 20 if runs >= 3 else 0
+
+        return pts_dist + pts_pace + pts_time + pts_runs + pts_long + bonus
+
+    rank_list = []
     for uid, arr in buckets.items():
         nick = db.collection("users").document(uid).get().to_dict().get("nickname","Usuario")
-        rank.append({"userID": uid, "nickname": nick, "points": score(arr)})
-    rank.sort(key=lambda x: x["points"], reverse=True)
-    return {"ranking": rank}
+        rank_list.append({"userID": uid, "nickname": nick, "points": score(arr)})
+    rank_list.sort(key=lambda x: x["points"], reverse=True)
+    return {"ranking": rank_list}
 
 # ——— Likes & Comments ——————————————————————————————————
 @app.post("/activities/{act}/likes/{uid}")
