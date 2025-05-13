@@ -146,8 +146,8 @@ def strava_activities(uid: str, per_page: int = Query(100, le=200)):
                 "userID":           uid,
                 "id":               str(a["id"]),
                 "type":             a["type"],
-                "distance":         round(a["distance"]/1000, 2),
-                "duration":         round(a["moving_time"]/60, 2),
+                "distance":         round(a["distance"] / 1000, 2),
+                "duration":         round(a["moving_time"] / 60, 2),
                 "elevation":        round(a["total_elevation_gain"], 2),
                 "avg_speed":        a.get("average_speed"),
                 "summary_polyline": a["map"]["summary_polyline"],
@@ -171,9 +171,8 @@ def save_activity(p: dict = Body(...)):
     doc_id = f"{p['userID']}_{p['id']}"
     base = {k: p[k] for k in ("userID","type","distance","duration","elevation","date")}
     base["activityID"] = str(p["id"])
-    if "avg_speed" in p:        base["avg_speed"] = p["avg_speed"]
+    if "avg_speed" in p:        base["avg_speed"]        = p["avg_speed"]
     if "summary_polyline" in p: base["summary_polyline"] = p["summary_polyline"]
-
     db.collection("activities").document(doc_id).set({**base, "includedInLeagues": p["includedInLeagues"]})
     for lg in p["includedInLeagues"]:
         db.collection("leagues").document(lg).collection("activities").document(doc_id).set(base)
@@ -189,7 +188,6 @@ def league_ranking(
     docs = db.collection("leagues").document(lid).collection("activities").stream()
     acts = [d.to_dict() for d in docs]
 
-    # filtro semanal
     if period.lower() == "weekly":
         cutoff = datetime.utcnow() - timedelta(days=7)
         acts = [
@@ -197,66 +195,52 @@ def league_ranking(
             if datetime.fromisoformat(a["date"].rstrip("Z")) >= cutoff
         ]
 
-    # agrupo por usuario
     buckets = defaultdict(list)
     for a in acts:
         buckets[a["userID"]].append(a)
 
-    # función de puntuación
     def score(arr):
-        # 1) Distancia: 1 pt/km, hasta 60
         dist = sum(a["distance"] for a in arr)
         pts_dist = min(60, int(dist))
 
-        # 2) Ritmo medio (min/km): escala lineal entre 7.5→0 y 5.0→60
         time_m = sum(a["duration"] for a in arr)
-        if time_m > 0 and dist > 0:
-            spkph = dist / (time_m / 60)
-            pace = (1 / spkph) * 60
+        if time_m>0 and dist>0:
+            spkph = dist/(time_m/60)
+            pace = (1/spkph)*60
         else:
             pace = float("inf")
-
-        if pace <= 5.0:
+        if pace<=5.0:
             pts_pace = 60
-        elif pace >= 7.5:
+        elif pace>=7.5:
             pts_pace = 0
         else:
-            pts_pace = round((7.5 - pace) / (7.5 - 5.0) * 60)
+            pts_pace = round((7.5-pace)/(7.5-5.0)*60)
 
-        # 3) Desnivel: 1 pt cada 10 m, hasta 30
         elev = sum(a["elevation"] for a in arr)
-        pts_elev = min(30, int(elev / 10))
+        pts_elev = min(30, int(elev/10))
 
-        # 4) Nº de carreras: 1→10, 2→20, ≥3→30
         runs = len(arr)
-        pts_runs = min(30, runs * 10)
+        pts_runs = min(30, runs*10)
 
-        # 5) Tirada más larga: tramos fijos
         longest = max((a["distance"] for a in arr), default=0)
-        if longest >= 15:
+        if longest>=15:
             pts_long = 30
-        elif longest >= 10:
+        elif longest>=10:
             pts_long = 20
-        elif longest >= 5:
+        elif longest>=5:
             pts_long = 10
         else:
             pts_long = 0
 
-        # 6) Bonus constancia
-        pts_bonus = 20 if runs >= 3 else 0
+        pts_bonus = 20 if runs>=3 else 0
 
         return pts_dist + pts_pace + pts_elev + pts_runs + pts_long + pts_bonus
 
-    # construyo el ranking
     rank = []
     for uid, arr in buckets.items():
         user_doc = db.collection("users").document(uid).get()
-        nick = user_doc.to_dict().get("nickname", "Usuario") if user_doc.exists else "Usuario"
-        rank.append({
-            "userID":  uid,
-            "nickname": nick,
-            "points":  score(arr)
-        })
+        nick = user_doc.to_dict().get("nickname","Usuario") if user_doc.exists else "Usuario"
+        rank.append({"userID": uid, "nickname": nick, "points": score(arr)})
 
     rank.sort(key=lambda x: x["points"], reverse=True)
     return {"ranking": rank}
@@ -307,7 +291,7 @@ def save_achievements(p: dict = Body(...)):
     db.collection("userAchievements").document(uid).set({
         "unlocked":   unlocked,
         "locked":     locked,
-        "updatedAt": datetime.utcnow().isoformat()
+        "updatedAt":  datetime.utcnow().isoformat()
     })
     return {"success": True}
 
