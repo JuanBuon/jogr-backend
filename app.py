@@ -33,18 +33,17 @@ db = firestore.Client(
 )
 log.info("✅ Firestore conectado")
 
-# ——— Strava constants —————————————————————————————————————
+# ——— Strava constants ————————————————————————————————————
 CLIENT_ID             = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET         = os.getenv("CLIENT_SECRET", "")
 STRAVA_TOKEN_URL      = "https://www.strava.com/oauth/token"
 STRAVA_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 
-# Callback endpoint
 CALLBACK_PATH  = "/auth/strava/callback"
 BACKEND_ORIGIN = os.getenv("BACKEND_ORIGIN", "https://jogr-backend.onrender.com")
 REDIRECT_URI   = f"{BACKEND_ORIGIN}{CALLBACK_PATH}"
 
-# ——— Helpers Firestore ——————————————————————————————————————
+# ——— Helpers Firestore ————————————————————————————————————
 def oauth_doc(uid: str):
     return db.collection("users").document(uid).collection("oauth").document("strava")
 
@@ -52,7 +51,6 @@ def ensure_access_token(uid: str) -> str:
     doc = oauth_doc(uid).get()
     if not doc.exists:
         raise HTTPException(404, "Token Strava no encontrado")
-
     data = doc.to_dict()
     if time.time() > data["expires_at"] - 300:
         log.info("🔄 Refrescando token Strava para %s", uid)
@@ -83,7 +81,7 @@ def _fmt_act(d: dict) -> dict:
     if "summary_polyline" in d: out["summary_polyline"] = d["summary_polyline"]
     return out
 
-# ——— Health-check ——————————————————————————————————————————
+# ——— Health-check —————————————————————————————————————————
 @app.get("/")
 def health() -> PlainTextResponse:
     return PlainTextResponse("OK", status_code=200)
@@ -129,7 +127,7 @@ def strava_callback(
     log.info("💾 Tokens guardados para userID=%s", uid)
     return RedirectResponse(f"jogr://auth?userID={uid}&code={code}", status_code=302)
 
-# ——— Strava raw activities ————————————————————————————————
+# ——— Strava “raw” activities ——————————————————————————————
 @app.get("/users/{uid}/strava/activities")
 def strava_activities(uid: str, per_page: int = Query(100, le=200)):
     token = ensure_access_token(uid)
@@ -180,15 +178,43 @@ def save_activity(p: dict = Body(...)):
 
     return {"success": True}
 
-# ——— Liga: raw activities ———————————————————————————————————
+# ——— Liga: actividades con social —————————————————————————
 @app.get("/league/{lid}/activities")
-def league_activities(lid: str):
-    log.info("📥 solicitadas actividades de liga %s", lid)
+def league_activities(
+    lid: str,
+    user_id: str = Query(None, alias="userID")
+):
+    log.info("📥 solicitadas actividades de liga %s para user %s", lid, user_id)
     docs = db.collection("leagues").document(lid).collection("activities").stream()
-    acts = [_fmt_act(d.to_dict()) for d in docs]
-    return {"activities": acts}
+    activities = []
+    for d in docs:
+        a = d.to_dict()
+        act_id = d.id
 
-# ——— Liga: ranking con nueva lógica ——————————————————————————
+        # likes
+        likes_doc = db.collection("activities")\
+                      .document(act_id)\
+                      .collection("social")\
+                      .document("likes").get()
+        users = likes_doc.to_dict().get("users", []) if likes_doc.exists else []
+        like_count = len(users)
+        did_i_like = (user_id in users) if user_id else False
+
+        # comments
+        comments = db.collection("activities")\
+                     .document(act_id)\
+                     .collection("comments").stream()
+        comment_count = sum(1 for _ in comments)
+
+        entry = _fmt_act(a)
+        entry["likeCount"]    = like_count
+        entry["didILike"]     = did_i_like
+        entry["commentCount"] = comment_count
+        activities.append(entry)
+
+    return {"activities": activities}
+
+# ——— Liga: ranking (general o weekly) —————————————————————————
 @app.get("/league/{lid}/ranking")
 def league_ranking(
     lid: str,
@@ -206,37 +232,32 @@ def league_ranking(
         buckets[a["userID"]].append(a)
 
     def score(arr):
-        dist = sum(a["distance"] for a in arr)
-        pts_dist = min(60, int(dist))
-
-        time_m = sum(a["duration"] for a in arr)
-        spkph = dist / (time_m/60) if time_m>0 else 0
-        pace = (1/spkph)*60 if spkph>0 else float('inf')
-        if pace <= 5:
-            pts_pace = 60
-        elif pace >= 7.5:
-            pts_pace = 0
-        else:
-            pts_pace = round((7.5 - pace)/(7.5 - 5)*60)
-
-        elev = sum(a["elevation"] for a in arr)
-        pts_elev = min(30, int(elev/10))
-
-        runs = len(arr)
-        pts_runs = min(30, runs*10)
-
+        dist    = sum(a["distance"] for a in arr)
+        pts     = 0
+        # 1) distancia
+        pts += min(60, int(dist))
+        # 2) ritmo (min/km)
+        time_m  = sum(a["duration"] for a in arr)
+        spkph   = dist/(time_m/60) if time_m>0 else 0
+        pace    = (1/spkph)*60 if spkph>0 else float('inf')
+        if pace <= 5:      pts += 60
+        elif pace >= 7.5:  pts += 0
+        else:              pts += round((7.5 - pace)/(7.5 - 5)*60)
+        # 3) desnivel
+        elev    = sum(a["elevation"] for a in arr)
+        pts += min(30, int(elev/10))
+        # 4) salidas
+        runs    = len(arr)
+        pts += min(30, runs*10)
+        # 5) tirada larga
         longest = max((a["distance"] for a in arr), default=0)
-        if longest >= 15:
-            pts_long = 30
-        elif longest >= 10:
-            pts_long = 20
-        elif longest >= 5:
-            pts_long = 10
-        else:
-            pts_long = 0
+        if   longest >= 15: pts += 30
+        elif longest >= 10: pts += 20
+        elif longest >=  5: pts += 10
+        # 6) bonus
+        if runs >= 3:      pts += 20
 
-        pts_bonus = 20 if runs >= 3 else 0
-        return pts_dist + pts_pace + pts_elev + pts_runs + pts_long + pts_bonus
+        return pts
 
     rank = []
     for uid, arr in buckets.items():
@@ -248,14 +269,14 @@ def league_ranking(
 # ——— Likes & Comments ————————————————————————————————————
 @app.post("/activities/{act}/likes/{uid}")
 def toggle_like(act: str, uid: str):
-    ref  = db.collection("activities").document(act).collection("social").document("likes")
-    doc  = ref.get()
-    likes= doc.to_dict().get("users",[]) if doc.exists else []
-    did  = uid not in likes
-    if did: likes.append(uid)
-    else:   likes.remove(uid)
-    ref.set({"users": likes})
-    return {"success": True, "didLike": did, "likeCount": len(likes)}
+    ref   = db.collection("activities").document(act).collection("social").document("likes")
+    doc   = ref.get()
+    users = doc.to_dict().get("users", []) if doc.exists else []
+    did   = uid not in users
+    if did: users.append(uid)
+    else:   users.remove(uid)
+    ref.set({"users": users})
+    return {"success": True, "didLike": did, "likeCount": len(users)}
 
 @app.get("/activities/{act}/comments")
 def get_comments(act: str):
