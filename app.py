@@ -89,8 +89,8 @@ def health() -> PlainTextResponse:
 # ——— Strava OAuth callback ——————————————————————————————
 @app.get(CALLBACK_PATH)
 def strava_callback(
-    code:  str = Query(...),
-    state: str = Query(None)
+    code:  str = Query(..., description="Código de autorización de Strava"),
+    state: str = Query(None, description="State opcional")
 ):
     log.info("🔑 Callback Strava recibido: code=%s state=%s", code, state)
     r = requests.post(STRAVA_TOKEN_URL, data={
@@ -102,6 +102,8 @@ def strava_callback(
     })
     r.raise_for_status()
     tok = r.json()
+    log.info("✅ Token Strava OK: athlete.id=%s", tok["athlete"]["id"])
+
     sid  = str(tok["athlete"]["id"])
     nick = tok["athlete"].get("username") or tok["athlete"].get("firstname") or "strava"
     q    = db.collection("users").where("stravaID","==",sid).get()
@@ -111,23 +113,33 @@ def strava_callback(
             "userID":    uid,
             "stravaID":  sid,
             "nickname":  nick,
-            "email":     "", "birthdate": "", "gender": "",
-            "country":   "", "description":"", "platforms": {"strava": sid}
+            "email":     "",
+            "birthdate": "",
+            "gender":    "",
+            "country":   "",
+            "description":"",
+            "platforms": {"strava": sid}
         })
+        log.info("🆕 Usuario creado: %s (Strava %s)", uid, sid)
+
     tok["expires_at"] = time.time() + tok["expires_in"]
     oauth_doc(uid).set(tok)
+    log.info("💾 Tokens guardados para userID=%s", uid)
     return RedirectResponse(f"jogr://auth?userID={uid}&code={code}", status_code=302)
 
-# ——— Strava raw activities ——————————————————————————————
+# ——— Strava “raw” activities ——————————————————————————————
 @app.get("/users/{uid}/strava/activities")
 def strava_activities(uid: str, per_page: int = Query(100, le=200)):
     token = ensure_access_token(uid)
-    r = requests.get(STRAVA_ACTIVITIES_URL,
-                     headers={"Authorization": f"Bearer {token}"},
-                     params={"per_page": per_page})
+    r = requests.get(
+        STRAVA_ACTIVITIES_URL,
+        headers={"Authorization": f"Bearer {token}"},
+        params={"per_page": per_page}
+    )
     r.raise_for_status()
     arr = r.json()
-    return {"activities":[
+    log.info("📦 %d actividades Strava para %s", len(arr), uid)
+    return {"activities": [
         {
             "userID":           uid,
             "id":               str(a["id"]),
@@ -146,21 +158,24 @@ def strava_activities(uid: str, per_page: int = Query(100, le=200)):
 @app.get("/activities/{uid}")
 def activities_by_user(uid: str):
     docs = db.collection("activities").where("userID","==",uid).stream()
-    return {"activities":[_fmt_act(d.to_dict()) for d in docs]}
+    return {"activities": [_fmt_act(d.to_dict()) for d in docs]}
 
 @app.post("/activities/save")
 def save_activity(p: dict = Body(...)):
     need = {"userID","id","type","distance","duration","elevation","date","includedInLeagues"}
     if not need.issubset(p):
-        raise HTTPException(400,"Faltan campos")
+        raise HTTPException(400,"Faltan campos en /activities/save")
+
     doc_id = f"{p['userID']}_{p['id']}"
-    base   = {k:p[k] for k in ("userID","type","distance","duration","elevation","date")}
-    base["activityID"]=str(p["id"])
-    if "avg_speed"       in p: base["avg_speed"]=p["avg_speed"]
-    if "summary_polyline"in p: base["summary_polyline"]=p["summary_polyline"]
-    db.collection("activities").document(doc_id).set({**base,"includedInLeagues":p["includedInLeagues"]})
+    base   = {k: p[k] for k in ("userID","type","distance","duration","elevation","date")}
+    base["activityID"] = str(p["id"])
+    if "avg_speed"        in p: base["avg_speed"]        = p["avg_speed"]
+    if "summary_polyline" in p: base["summary_polyline"] = p["summary_polyline"]
+
+    db.collection("activities").document(doc_id).set({**base, "includedInLeagues": p["includedInLeagues"]})
     for lg in p["includedInLeagues"]:
         db.collection("leagues").document(lg).collection("activities").document(doc_id).set(base)
+
     return {"success": True}
 
 # ——— Liga: actividades con social —————————————————————————
@@ -186,57 +201,61 @@ def league_activities(
         did_i_like = (user_id in users) if user_id else False
 
         # comments
-        comm_docs = db.collection("activities")\
-                      .document(act_id)\
-                      .collection("comments").stream()
-        comment_count = sum(1 for _ in comm_docs)
+        comments = db.collection("activities")\
+                     .document(act_id)\
+                     .collection("comments").stream()
+        comment_count = sum(1 for _ in comments)
 
         entry = _fmt_act(a)
-        entry.update({
-            "likeCount": like_count,
-            "didILike": did_i_like,
-            "commentCount": comment_count
-        })
+        entry["likeCount"]    = like_count
+        entry["didILike"]     = did_i_like
+        entry["commentCount"] = comment_count
         activities.append(entry)
+
     return {"activities": activities}
 
-# ——— Liga: ranking ————————————————————————————————————
+# ——— Liga: ranking ——————————————————————————————————————
 @app.get("/league/{lid}/ranking")
 def league_ranking(
     lid: str,
-    period: str = Query("general")
+    period: str = Query("general", description="general o weekly")
 ):
+    log.info("📊 calculando ranking %s para liga %s", period, lid)
     docs = db.collection("leagues").document(lid).collection("activities").stream()
     acts = [d.to_dict() for d in docs]
-    if period.lower()=="weekly":
-        cutoff = datetime.utcnow()-timedelta(days=7)
-        acts = [a for a in acts if datetime.fromisoformat(a["date"].replace("Z",""))>=cutoff]
-    buckets=defaultdict(list)
-    for a in acts: buckets[a["userID"]].append(a)
+    if period.lower() == "weekly":
+        cutoff = datetime.utcnow() - timedelta(days=7)
+        acts = [a for a in acts if datetime.fromisoformat(a["date"].replace("Z","")) >= cutoff]
+
+    buckets = defaultdict(list)
+    for a in acts:
+        buckets[a["userID"]].append(a)
 
     def score(arr):
-        pts=0
-        dist=sum(a["distance"] for a in arr)
-        pts+=min(60,int(dist))
-        tm=sum(a["duration"] for a in arr)
-        pace=(1/(dist/(tm/60)))*60 if tm>0 else float('inf')
-        if pace<=5: pts+=60
-        elif pace<7.5: pts+=round((7.5-pace)/(2.5)*60)
-        elev=sum(a["elevation"] for a in arr)
-        pts+=min(30,int(elev/10))
-        runs=len(arr)
-        pts+=min(30,runs*10)
-        longest=max((a["distance"] for a in arr),default=0)
-        if longest>=15: pts+=30
-        elif longest>=10: pts+=20
-        elif longest>=5: pts+=10
-        if runs>=3: pts+=20
+        dist    = sum(a["distance"] for a in arr)
+        pts     = 0
+        pts    += min(60, int(dist))
+        time_m  = sum(a["duration"] for a in arr)
+        spkph   = dist/(time_m/60) if time_m>0 else 0
+        pace    = (1/spkph)*60 if spkph>0 else float('inf')
+        if pace <= 5:      pts += 60
+        elif pace >= 7.5:  pts += 0
+        else:              pts += round((7.5 - pace)/(7.5 - 5)*60)
+        elev    = sum(a["elevation"] for a in arr)
+        pts    += min(30, int(elev/10))
+        runs    = len(arr)
+        pts    += min(30, runs*10)
+        longest = max((a["distance"] for a in arr), default=0)
+        if   longest >= 15: pts += 30
+        elif longest >= 10: pts += 20
+        elif longest >=  5: pts += 10
+        if runs >= 3:       pts += 20
         return pts
 
-    rank=[]
-    for uid,arr in buckets.items():
-        nick=db.collection("users").document(uid).get().to_dict().get("nickname","Usuario")
-        rank.append({"userID":uid,"nickname":nick,"points":score(arr)})
+    rank = []
+    for uid, arr in buckets.items():
+        nick = db.collection("users").document(uid).get().to_dict().get("nickname","Usuario")
+        rank.append({"userID": uid, "nickname": nick, "points": score(arr)})
     rank.sort(key=lambda x: x["points"], reverse=True)
     return {"ranking": rank}
 
@@ -256,17 +275,13 @@ def toggle_like(act: str, uid: str):
 def get_comments(act: str):
     docs = db.collection("activities").document(act).collection("comments")\
              .order_by("date").stream()
-    comments = [
-        d.to_dict() | {"id": d.id, "activityID": act}
-        for d in docs
-    ]
-    return {"comments": comments}
+    return {"comments": [d.to_dict() | {"id": d.id} for d in docs]}
 
 @app.post("/activities/{act}/comments")
 def add_comment(act: str, p: dict = Body(...)):
     need = {"userID","nickname","text"}
     if not need.issubset(p):
-        raise HTTPException(400,"Faltan campos")
+        raise HTTPException(400,"Faltan campos en POST /activities/{act}/comments")
     cid = str(uuid.uuid4())
     db.collection("activities").document(act).collection("comments").document(cid).set({
         "userID":   p["userID"],
@@ -276,15 +291,30 @@ def add_comment(act: str, p: dict = Body(...)):
     })
     return {"success": True, "commentID": cid}
 
-# ——— Achievements ——————————————————————————————————————
+@app.delete("/activities/{act}/comments/{cid}")
+def delete_comment(act: str, cid: str, userID: str = Query(...)):
+    doc_ref = db.collection("activities").document(act).collection("comments").document(cid)
+    doc = doc_ref.get()
+    if not doc.exists:
+        raise HTTPException(404, "Comentario no encontrado")
+    data = doc.to_dict()
+    if data.get("userID") != userID:
+        raise HTTPException(403, "No tienes permiso para borrar este comentario")
+    doc_ref.delete()
+    return {"success": True}
+
+# ——— Achievements —————————————————————————————————————
 @app.post("/achievements/save")
 def save_achievements(p: dict = Body(...)):
     uid      = p.get("userID")
     unlocked = p.get("unlocked",{})
     locked   = p.get("locked",[])
-    if not uid: raise HTTPException(400,"Falta userID")
+    if not uid:
+        raise HTTPException(400,"Falta userID en /achievements/save")
     db.collection("userAchievements").document(uid).set({
-        "unlocked": unlocked, "locked": locked, "updatedAt": datetime.utcnow().isoformat()
+        "unlocked":  unlocked,
+        "locked":    locked,
+        "updatedAt": datetime.utcnow().isoformat()
     })
     return {"success": True}
 
@@ -292,7 +322,7 @@ def save_achievements(p: dict = Body(...)):
 def get_achievements(uid: str):
     d = db.collection("userAchievements").document(uid).get()
     base = {"exists": d.exists}
-    return {**base, **(d.to_dict() if d.exists else {"unlocked":{}, "locked":[]})}
+    return {**base, **(d.to_dict() if d.exists else {"unlocked": {}, "locked": []})}
 
 if __name__ == "__main__":
     import uvicorn
