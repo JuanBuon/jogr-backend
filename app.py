@@ -214,7 +214,7 @@ def league_activities(
 
     return {"activities": activities}
 
-# ——— Liga: ranking ——————————————————————————————————————
+# ——— Liga: ranking (general o weekly) —————————————————————————
 @app.get("/league/{lid}/ranking")
 def league_ranking(
     lid: str,
@@ -232,24 +232,30 @@ def league_ranking(
         buckets[a["userID"]].append(a)
 
     def score(arr):
-        dist    = sum(a["distance"] for a in arr)
-        pts     = 0
-        pts    += min(60, int(dist))
-        time_m  = sum(a["duration"] for a in arr)
-        spkph   = dist/(time_m/60) if time_m>0 else 0
-        pace    = (1/spkph)*60 if spkph>0 else float('inf')
+        pts = 0
+        # 1) distancia
+        dist = sum(a["distance"] for a in arr)
+        pts += min(60, int(dist))
+        # 2) ritmo
+        time_m = sum(a["duration"] for a in arr)
+        spkph  = dist/(time_m/60) if time_m>0 else 0
+        pace   = (1/spkph)*60 if spkph>0 else float('inf')
         if pace <= 5:      pts += 60
         elif pace >= 7.5:  pts += 0
         else:              pts += round((7.5 - pace)/(7.5 - 5)*60)
-        elev    = sum(a["elevation"] for a in arr)
-        pts    += min(30, int(elev/10))
-        runs    = len(arr)
-        pts    += min(30, runs*10)
+        # 3) desnivel
+        elev = sum(a["elevation"] for a in arr)
+        pts += min(30, int(elev/10))
+        # 4) carreras
+        runs = len(arr)
+        pts += min(30, runs*10)
+        # 5) tirada larga
         longest = max((a["distance"] for a in arr), default=0)
         if   longest >= 15: pts += 30
         elif longest >= 10: pts += 20
-        elif longest >=  5: pts += 10
-        if runs >= 3:       pts += 20
+        elif longest >= 5:  pts += 10
+        # 6) bonus
+        if runs >= 3:      pts += 20
         return pts
 
     rank = []
@@ -259,7 +265,7 @@ def league_ranking(
     rank.sort(key=lambda x: x["points"], reverse=True)
     return {"ranking": rank}
 
-# ——— Likes & Comments ————————————————————————————————————
+# ——— Likes & Comments (directos) ——————————————————————————
 @app.post("/activities/{act}/likes/{uid}")
 def toggle_like(act: str, uid: str):
     ref   = db.collection("activities").document(act).collection("social").document("likes")
@@ -292,38 +298,14 @@ def add_comment(act: str, p: dict = Body(...)):
     return {"success": True, "commentID": cid}
 
 @app.delete("/activities/{act}/comments/{cid}")
-def delete_comment(act: str, cid: str, userID: str = Query(...)):
-    doc_ref = db.collection("activities").document(act).collection("comments").document(cid)
-    doc = doc_ref.get()
-    if not doc.exists:
-        raise HTTPException(404, "Comentario no encontrado")
-    data = doc.to_dict()
-    if data.get("userID") != userID:
-        raise HTTPException(403, "No tienes permiso para borrar este comentario")
-    doc_ref.delete()
+def delete_comment(act: str, cid: str):
+    ref = db.collection("activities").document(act).collection("comments").document(cid)
+    ref.delete()
     return {"success": True}
-
-# ——— Achievements —————————————————————————————————————
-@app.post("/achievements/save")
-def save_achievements(p: dict = Body(...)):
-    uid      = p.get("userID")
-    unlocked = p.get("unlocked",{})
-    locked   = p.get("locked",[])
-    if not uid:
-        raise HTTPException(400,"Falta userID en /achievements/save")
-    db.collection("userAchievements").document(uid).set({
-        "unlocked":  unlocked,
-        "locked":    locked,
-        "updatedAt": datetime.utcnow().isoformat()
-    })
-    return {"success": True}
-
-@app.get("/achievements/{uid}")
-def get_achievements(uid: str):
-    d = db.collection("userAchievements").document(uid).get()
-    base = {"exists": d.exists}
-    return {**base, **(d.to_dict() if d.exists else {"unlocked": {}, "locked": []})}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT","10000")), log_level="info")
+    uvicorn.run("app:app",
+                host="0.0.0.0",
+                port=int(os.getenv("PORT","10000")),
+                log_level="info")
