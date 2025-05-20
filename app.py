@@ -1,4 +1,10 @@
-import os, json, time, uuid, logging, requests
+import os
+import json
+import time
+import uuid
+import logging
+import requests
+
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -8,40 +14,39 @@ from fastapi.responses import RedirectResponse, PlainTextResponse
 from google.cloud import firestore
 from google.oauth2 import service_account
 
-# ——— Logging ————————————————————————————————
+# ——— Configuración de logging —————————————————————————
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("jogr-backend")
 
-# ——— Init FastAPI ————————————————————————————
+# ——— Init FastAPI ——————————————————————————————————————
 app = FastAPI()
 
-# ——— Firestore ——————————————————————————————
+# ——— Firestore ————————————————————————————————————————
 cred_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
 if not cred_json:
     raise RuntimeError("Falta GOOGLE_CREDENTIALS_JSON")
 
 db = firestore.Client(
     credentials=service_account.Credentials.from_service_account_info(
-        json.loads(cred_json))
+        json.loads(cred_json)
+    )
 )
 log.info("✅ Firestore conectado")
 
-# ——— Strava constants ——————————————————————
+# ——— Strava constants ————————————————————————————————————
 CLIENT_ID             = os.getenv("CLIENT_ID", "")
 CLIENT_SECRET         = os.getenv("CLIENT_SECRET", "")
 STRAVA_TOKEN_URL      = "https://www.strava.com/oauth/token"
 STRAVA_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 
 CALLBACK_PATH  = "/auth/strava/callback"
-BACKEND_ORIGIN = os.getenv("BACKEND_ORIGIN",
-                           "https://jogr-backend.onrender.com")
+BACKEND_ORIGIN = os.getenv("BACKEND_ORIGIN", "https://jogr-backend.onrender.com")
 REDIRECT_URI   = f"{BACKEND_ORIGIN}{CALLBACK_PATH}"
 
-# ——— Helpers ————————————————————————————————
+# ——— Helpers Firestore ————————————————————————————————————
 def oauth_doc(uid: str):
-    return db.collection("users").document(uid)\
-             .collection("oauth").document("strava")
+    return db.collection("users").document(uid).collection("oauth").document("strava")
 
 def ensure_access_token(uid: str) -> str:
     doc = oauth_doc(uid).get()
@@ -63,12 +68,11 @@ def ensure_access_token(uid: str) -> str:
         return fresh["access_token"]
     return data["access_token"]
 
+# ——— Normalizador de actividades —————————————————————————
+
 def _fmt_act(d: dict) -> dict:
-    """
-    Normaliza la actividad DEVUELTA a la app, con valores por defecto
-    y ahora incluye includedInLeagues para que el cliente sepa
-    si participa en alguna liga.
-    """
+    """Devuelve el shape que espera la app móvil, con valores por defecto y
+    el nuevo campo includedInLeagues para que el cliente sepa si compite."""
     out = {
         "userID":    d["userID"],
         "id":        str(d.get("activityID") or d.get("id")),
@@ -87,20 +91,60 @@ def _fmt_act(d: dict) -> dict:
     if "summary_polyline" in d: out["summary_polyline"] = d["summary_polyline"]
     return out
 
-# ——— Health-check ————————————————————————————
+# ——— Health-check —————————————————————————————————————————
 @app.get("/")
 def health() -> PlainTextResponse:
     return PlainTextResponse("OK", status_code=200)
 
-# ——— OAuth callback ——————————————————————————
+# ——— Strava OAuth callback ——————————————————————————————
 @app.get(CALLBACK_PATH)
-def strava_callback(code: str = Query(...),
-                    state: str = Query(None)):
-    # ... (sin cambios en esta sección) ...
-    # código igual que antes
-    pass  # ← omito por brevedad, copia tu versión sin cambios
+def strava_callback(
+    code:  str = Query(..., description="Código de autorización de Strava"),
+    state: str = Query(None, description="State opcional")
+):
+    log.info("🔑 Callback Strava recibido: code=%s state=%s", code, state)
 
-# ——— Strava raw activities ——————————————————
+    # 1) Intercambio del code por tokens
+    r = requests.post(STRAVA_TOKEN_URL, data={
+        "client_id":     CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "code":          code,
+        "grant_type":    "authorization_code",
+        "redirect_uri":  REDIRECT_URI
+    })
+    r.raise_for_status()
+    tok = r.json()
+    log.info("✅ Token Strava OK: athlete.id=%s", tok["athlete"]["id"])
+
+    # 2) Usuario en Firestore (o crear si es nuevo)
+    sid  = str(tok["athlete"]["id"])
+    nick = tok["athlete"].get("username") or tok["athlete"].get("firstname") or "strava"
+    q    = db.collection("users").where("stravaID", "==", sid).get()
+    uid  = q[0].id if q else str(uuid.uuid4())
+
+    if not q:
+        db.collection("users").document(uid).set({
+            "userID":    uid,
+            "stravaID":  sid,
+            "nickname":  nick,
+            "email":     "",
+            "birthdate": "",
+            "gender":    "",
+            "country":   "",
+            "description":"",
+            "platforms": {"strava": sid}
+        })
+        log.info("🆕 Usuario creado: %s (Strava %s)", uid, sid)
+
+    # 3) Guardar tokens con expires_at
+    tok["expires_at"] = time.time() + tok["expires_in"]
+    oauth_doc(uid).set(tok)
+    log.info("💾 Tokens guardados para userID=%s", uid)
+
+    # 4) Redirige a la app móvil
+    return RedirectResponse(f"jogr://auth?userID={uid}&code={code}", status_code=302)
+
+# ——— Strava “raw” activities ——————————————————————————————
 @app.get("/users/{uid}/strava/activities")
 def strava_activities(uid: str, per_page: int = Query(100, le=200)):
     token = ensure_access_token(uid)
@@ -115,21 +159,26 @@ def strava_activities(uid: str, per_page: int = Query(100, le=200)):
             "userID":           uid,
             "id":               str(a["id"]),
             "type":             a["type"],
-            "distance":         round(a["distance"]/1000, 2),
-            "duration":         round(a["moving_time"]/60, 2),
+            "distance":         round(a["distance"] / 1000, 2),
+            "duration":         round(a["moving_time"] / 60, 2),
             "elevation":        round(a["total_elevation_gain"], 2),
             "avg_speed":        a.get("average_speed"),
             "summary_polyline": a["map"]["summary_polyline"],
             "date":             a["start_date"],
-            "includedInLeagues": [],            # ← ahora viene vacío
+            "includedInLeagues": [],
             "likeCount": 0,
-            "didILike":  False,
+            "didILike": False,
             "commentCount": 0
         }
         for a in arr if a["type"] in ("Run", "Walk")
     ]}
 
 # ——— CRUD propias ————————————————————————————————————————
+@app.get("/activities/{uid}")
+def activities_by_user(uid: str):
+    docs = db.collection("activities").where("userID", "==", uid).stream()
+    return {"activities": [_fmt_act(d.to_dict()) for d in docs]}
+
 @app.post("/activities/save")
 def save_activity(p: dict = Body(...)):
     need = {"userID", "id", "type", "distance", "duration",
@@ -138,23 +187,20 @@ def save_activity(p: dict = Body(...)):
         raise HTTPException(400, "Faltan campos en /activities/save")
 
     doc_id = f"{p['userID']}_{p['id']}"
-    base = {k: p[k] for k in
-            ("userID", "type", "distance", "duration", "elevation", "date")}
-
+    base = {k: p[k] for k in ("userID", "type", "distance", "duration", "elevation", "date")}
     base["activityID"] = str(p["id"])
+
     if "avg_speed"        in p: base["avg_speed"]        = p["avg_speed"]
     if "summary_polyline" in p: base["summary_polyline"] = p["summary_polyline"]
-    base["includedInLeagues"] = p["includedInLeagues"]   # ← se almacena
+    base["includedInLeagues"] = p["includedInLeagues"]
 
-    # Guarda doc principal
     db.collection("activities").document(doc_id).set(base)
-
-    # Réplica en cada liga seleccionada
     for lg in p["includedInLeagues"]:
-        db.collection("leagues").document(lg)\
-            .collection("activities").document(doc_id).set(base)
+        db.collection("leagues").document(lg).collection("activities")\
+            .document(doc_id).set(base)
 
     return {"success": True}
+
 # ——— Liga: actividades con social —————————————————————————
 @app.get("/league/{lid}/activities")
 def league_activities(
