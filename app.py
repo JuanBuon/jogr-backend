@@ -68,6 +68,10 @@ def ensure_access_token(uid: str) -> str:
     return data["access_token"]
 
 def _fmt_act(d: dict) -> dict:
+    """
+    Devuelve siempre el mismo shape que espera la app móvil,
+    incluyendo las claves sociales con valores por defecto.
+    """
     out = {
         "userID":    d["userID"],
         "id":        str(d.get("activityID") or d.get("id")),
@@ -75,7 +79,11 @@ def _fmt_act(d: dict) -> dict:
         "distance":  d["distance"],
         "duration":  d["duration"],
         "elevation": d["elevation"],
-        "date":      d["date"]
+        "date":      d["date"],
+        # — sociales por defecto —
+        "likeCount":    d.get("likeCount", 0),
+        "didILike":     d.get("didILike", False),
+        "commentCount": d.get("commentCount", 0)
     }
     if "avg_speed"        in d: out["avg_speed"]        = d["avg_speed"]
     if "summary_polyline" in d: out["summary_polyline"] = d["summary_polyline"]
@@ -144,30 +152,34 @@ def strava_activities(uid: str, per_page: int = Query(100, le=200)):
             "userID":           uid,
             "id":               str(a["id"]),
             "type":             a["type"],
-            "distance":         round(a["distance"]/1000,2),
-            "duration":         round(a["moving_time"]/60,2),
-            "elevation":        round(a["total_elevation_gain"],2),
+            "distance":         round(a["distance"]/1000, 2),
+            "duration":         round(a["moving_time"]/60, 2),
+            "elevation":        round(a["total_elevation_gain"], 2),
             "avg_speed":        a.get("average_speed"),
             "summary_polyline": a["map"]["summary_polyline"],
-            "date":             a["start_date"]
+            "date":             a["start_date"],
+            # — sociales por defecto —
+            "likeCount": 0,
+            "didILike": False,
+            "commentCount": 0
         }
-        for a in arr if a["type"] in ("Run","Walk")
+        for a in arr if a["type"] in ("Run", "Walk")
     ]}
 
 # ——— CRUD propias ————————————————————————————————————————
 @app.get("/activities/{uid}")
 def activities_by_user(uid: str):
-    docs = db.collection("activities").where("userID","==",uid).stream()
+    docs = db.collection("activities").where("userID", "==", uid).stream()
     return {"activities": [_fmt_act(d.to_dict()) for d in docs]}
 
 @app.post("/activities/save")
 def save_activity(p: dict = Body(...)):
-    need = {"userID","id","type","distance","duration","elevation","date","includedInLeagues"}
+    need = {"userID", "id", "type", "distance", "duration", "elevation", "date", "includedInLeagues"}
     if not need.issubset(p):
-        raise HTTPException(400,"Faltan campos en /activities/save")
+        raise HTTPException(400, "Faltan campos en /activities/save")
 
     doc_id = f"{p['userID']}_{p['id']}"
-    base   = {k: p[k] for k in ("userID","type","distance","duration","elevation","date")}
+    base   = {k: p[k] for k in ("userID", "type", "distance", "duration", "elevation", "date")}
     base["activityID"] = str(p["id"])
     if "avg_speed"        in p: base["avg_speed"]        = p["avg_speed"]
     if "summary_polyline" in p: base["summary_polyline"] = p["summary_polyline"]
@@ -225,7 +237,7 @@ def league_ranking(
     acts = [d.to_dict() for d in docs]
     if period.lower() == "weekly":
         cutoff = datetime.utcnow() - timedelta(days=7)
-        acts = [a for a in acts if datetime.fromisoformat(a["date"].replace("Z","")) >= cutoff]
+        acts = [a for a in acts if datetime.fromisoformat(a["date"].replace("Z", "")) >= cutoff]
 
     buckets = defaultdict(list)
     for a in acts:
@@ -238,8 +250,8 @@ def league_ranking(
         pts += min(60, int(dist))
         # 2) ritmo
         time_m = sum(a["duration"] for a in arr)
-        spkph  = dist/(time_m/60) if time_m>0 else 0
-        pace   = (1/spkph)*60 if spkph>0 else float('inf')
+        spkph  = dist/(time_m/60) if time_m > 0 else 0
+        pace   = (1/spkph)*60 if spkph > 0 else float('inf')
         if pace <= 5:      pts += 60
         elif pace >= 7.5:  pts += 0
         else:              pts += round((7.5 - pace)/(7.5 - 5)*60)
@@ -260,7 +272,7 @@ def league_ranking(
 
     rank = []
     for uid, arr in buckets.items():
-        nick = db.collection("users").document(uid).get().to_dict().get("nickname","Usuario")
+        nick = db.collection("users").document(uid).get().to_dict().get("nickname", "Usuario")
         rank.append({"userID": uid, "nickname": nick, "points": score(arr)})
     rank.sort(key=lambda x: x["points"], reverse=True)
     return {"ranking": rank}
@@ -285,9 +297,9 @@ def get_comments(act: str):
 
 @app.post("/activities/{act}/comments")
 def add_comment(act: str, p: dict = Body(...)):
-    need = {"userID","nickname","text"}
+    need = {"userID", "nickname", "text"}
     if not need.issubset(p):
-        raise HTTPException(400,"Faltan campos en POST /activities/{act}/comments")
+        raise HTTPException(400, "Faltan campos en POST /activities/{act}/comments")
     cid = str(uuid.uuid4())
     db.collection("activities").document(act).collection("comments").document(cid).set({
         "userID":   p["userID"],
@@ -307,5 +319,5 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app",
                 host="0.0.0.0",
-                port=int(os.getenv("PORT","10000")),
+                port=int(os.getenv("PORT", "10000")),
                 log_level="info")
